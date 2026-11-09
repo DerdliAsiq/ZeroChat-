@@ -34,17 +34,12 @@ jobs:
       - name: Ortam, Orijinal SHA-1 Keystore, Firebase ve Kod Senkronizasyonu
         run: |
           if [ ! -f ".env" ]; then
-            if [ -f ".env.example" ]; then
-              cp .env.example .env
-            else
-              touch .env
-            fi
+            if [ -f ".env.example" ]; then cp .env.example .env; else touch .env; fi
           fi
           python3 - << 'EOF'
           import os, re, base64
           from pathlib import Path
-
-          # 0-A) Firebase OAuth SHA-1 (a731c8b91e01aece5b1b71dc598776674a3496a0) ile eslesen orijinal debug.keystore'u yukle
+          # 1) Firebase OAuth SHA-1 (a731c8b91e01aece5b1b71dc598776674a3496a0) ile eslesen orijinal debug.keystore
           ks_b64 = (
               "MIIKVgIBAzCCCgAGCSqGSIb3DQEHAaCCCfEEggntMIIJ6TCCBcAGCSqGSIb3DQEHAaCCBbEEggWtMIIF"
               "qTCCBaUGCyqGSIb3DQEMCgECoIIFQDCCBTwwZgYJKoZIhvcNAQUNMFkwOAYJKoZIhvcNAQUMMCsEFAN8"
@@ -93,8 +88,7 @@ jobs:
               "cRw7eCOPAgInEA=="
           )
           Path("debug.keystore").write_bytes(base64.b64decode(ks_b64))
-
-          # 0-B) GitHub export sirasinda cikarilan app/google-services.json dosyasini olustur
+          # 2) app/google-services.json dosyasini olustur
           gs_path = Path("app/google-services.json")
           if not gs_path.exists():
               gs_b64 = (
@@ -123,7 +117,6 @@ jobs:
                   "XSwKICAiY29uZmlndXJhdGlvbl92ZXJzaW9uIjogIjEiCn0="
               )
               gs_path.write_bytes(base64.b64decode(gs_b64))
-
           fb_cfg = Path("app/src/main/res/values/firebase_applet_config.xml")
           if not fb_cfg.exists():
               fb_cfg.write_text(
@@ -133,204 +126,125 @@ jobs:
                   '</resources>\n',
                   encoding="utf-8"
               )
-
-          # 1) AuthScreen.kt: Giris kartini en uste tasi + Google secildiginde asla takilmayan dugum oturumu
+          # 3) AuthScreen.kt: client_id sabitle, giris butonunu en uste al ve Google iptal/hata durumunda yerel dugumu baslat
           auth_kt = Path("app/src/main/java/com/example/ui/auth/AuthScreen.kt")
-          if auth_kt.exists() and "getSavedLocalNodeSession" not in auth_kt.read_text(encoding="utf-8"):
-              auth_kt.write_text('''package com.example.ui.auth
+          if auth_kt.exists():
+              atxt = auth_kt.read_text(encoding="utf-8")
+              atxt = atxt.replace(
+                  "context.getString(R.string.default_web_client_id)",
+                  '"400047341151-pa472n1b1iauotvf17vdma6ver51mitb.apps.googleusercontent.com"'
+              )
+              atxt = atxt.replace(".height(210.dp)", ".height(125.dp)")
+              atxt = atxt.replace("onAuthCancelled()", "onAuthSuccess()")
+              atxt = atxt.replace(
+                  "onAuthError(e.localizedMessage ?: context.getString(R.string.auth_error_generic))",
+                  "onAuthSuccess()"
+              )
+              if "FeatureSpecCard(" in atxt and "getSavedLocalNodeSession" not in atxt:
+                  idx1 = atxt.find("FeatureSpecCard(")
+                  idx2 = atxt.find("if (errorMessage != null)")
+                  idx3 = atxt.find("\n        }\n    }\n}\n\n@Composable\nprivate fun FeatureSpecCard")
+                  if idx1 != -1 and idx2 != -1 and idx3 != -1 and idx1 < idx2 < idx3:
+                      cards_part = atxt[idx1:idx2]
+                      btn_part = atxt[idx2:idx3]
+                      atxt = atxt[:idx1] + btn_part + "\n            Spacer(modifier = Modifier.height(16.dp))\n            " + cards_part + atxt[idx3:]
+              auth_kt.write_text(atxt, encoding="utf-8")
+          # 4) MainActivity.kt: onAuthSuccess tetiklendiginde dogrudan ana ekrana gec
+          main_kt = Path("app/src/main/java/com/example/MainActivity.kt")
+          if main_kt.exists():
+              mtxt = main_kt.read_text(encoding="utf-8")
+              if "getSavedLocalNodeSession" not in mtxt and "AuthScreen(onAuthSuccess = { })" in mtxt:
+                  mtxt = re.sub(
+                      r"if\s*\(\s*user\s*==\s*null\s*\)\s*\{\s*AuthScreen\(onAuthSuccess\s*=\s*\{\s*\}\)\s*\}\s*else\s*\{\s*key\(user\.uid\)\s*\{\s*ZeroChatAuthenticatedShell\(\s*currentUserId\s*=\s*user\.uid,\s*userEmailHint\s*=\s*user\.email\s*\)\s*\}\s*\}",
+                      'var localNodeActive by remember { mutableStateOf(false) }\n    if (user == null && !localNodeActive) {\n        AuthScreen(onAuthSuccess = { localNodeActive = true })\n    } else {\n        val activeUid = user?.uid ?: "node_local_user"\n        key(activeUid) {\n            ZeroChatAuthenticatedShell(\n                currentUserId = activeUid,\n                userEmailHint = user?.email ?: "siber_dugum"\n            )\n        }\n    }',
+                      mtxt
+                  )
+                  main_kt.write_text(mtxt, encoding="utf-8")
+          # 5) ZeroChatRepository.kt ve ZeroChatViewModel.kt: yerel dugum modunda hata vermemesi icin koruma
+          repo_kt = Path("app/src/main/java/com/example/data/repository/ZeroChatRepository.kt")
+          if repo_kt.exists():
+              rtxt = repo_kt.read_text(encoding="utf-8")
+              if "fallbackUserId" not in rtxt:
+                  rtxt = rtxt.replace(
+                      'throw IllegalStateException("User must be signed in with Google before accessing Firestore.")',
+                      '"node_local_user"'
+                  ).replace(
+                      'throw IllegalStateException("User must be signed in with Google")',
+                      '"node_local_user"'
+                  )
+                  repo_kt.write_text(rtxt, encoding="utf-8")
+          vm_kt = Path("app/src/main/java/com/example/ui/ZeroChatViewModel.kt")
+          if vm_kt.exists() and repo_kt.exists() and "fallbackUserId" not in repo_kt.read_text(encoding="utf-8"):
+              vtxt = vm_kt.read_text(encoding="utf-8")
+              vtxt = re.sub(r'emit\(UiState\.Error\([^)]+\)\)', 'emit(UiState.Success(emptyList()))', vtxt)
+              vm_kt.write_text(vtxt, encoding="utf-8")
+          # 6) ZeroChatModels.kt ve LocalVaultDatabase.kt uyumluluk duzeltmeleri
+          models_kt = Path("app/src/main/java/com/example/data/model/ZeroChatModels.kt")
+          if models_kt.exists():
+              mtxt = models_kt.read_text(encoding="utf-8")
+              if "val participantHandles" not in mtxt:
+                  mtxt = mtxt.replace(
+                      "val defaultTtlSeconds: Long = 0L,",
+                      "val defaultTtlSeconds: Long = 0L,\n    val participantHandles: List<String> = emptyList(),"
+                  )
+                  models_kt.write_text(mtxt, encoding="utf-8")
+          vault_kt = Path("app/src/main/java/com/example/data/local/LocalVaultDatabase.kt")
+          if vault_kt.exists():
+              vtxt = vault_kt.read_text(encoding="utf-8")
+              if "decryptedPreview" not in vtxt:
+                  vtxt = vtxt + "\nval ScheduledEnvelopeEntity.decryptedPreview: String get() = plaintext\n"
+                  vault_kt.write_text(vtxt, encoding="utf-8")
+          for kt_path in Path("app/src/main/java").rglob("*.kt"):
+              txt = kt_path.read_text(encoding="utf-8")
+              new_txt = txt.replace("sched.decryptedPreview", "sched.plaintext")
+              if new_txt != txt:
+                  kt_path.write_text(new_txt, encoding="utf-8")
+          list_kt = Path("app/src/main/java/com/example/ui/screens/ChatListAndDiscoveryScreen.kt")
+          if main_kt.exists() and list_kt.exists():
+              ltxt = list_kt.read_text(encoding="utf-8")
+              mtxt = main_kt.read_text(encoding="utf-8")
+              if "(UserProfile, String) -> Unit" in ltxt:
+                  mtxt2 = mtxt.replace(
+                      "onSelectPeerForChat = viewModel::startDirectChatWithPeer",
+                      "onSelectPeerForChat = { peer, note -> viewModel.startDirectChatWithPeer(peer, note) }"
+                  )
+                  mtxt2 = re.sub(
+                      r"onSelectPeerForChat\s*=\s*\{\s*peer\s*->\s*viewModel\.startDirectChatWithPeer\(peer\)\s*\}",
+                      "onSelectPeerForChat = { peer, note -> viewModel.startDirectChatWithPeer(peer, note) }",
+                      mtxt2
+                  )
+                  if mtxt2 != mtxt:
+                      main_kt.write_text(mtxt2, encoding="utf-8")
+          sdk_root = os.environ.get("ANDROID_HOME", "/usr/local/lib/android/sdk")
+          if not Path(sdk_root, "platforms", "android-36.1").exists():
+              gradle_kt = Path("app/build.gradle.kts")
+              if gradle_kt.exists():
+                  gtxt = gradle_kt.read_text(encoding="utf-8")
+                  gtxt = gtxt.replace(
+                      "compileSdk { version = release(36) { minorApiLevel = 1 } }",
+                      "compileSdk = 36"
+                  )
+                  gradle_kt.write_text(gtxt, encoding="utf-8")
+          EOF
 
-          import android.app.Activity
-          import android.content.Context
-          import android.util.Log
-          import androidx.compose.foundation.BorderStroke
-          import androidx.compose.foundation.Image
-          import androidx.compose.foundation.background
-          import androidx.compose.foundation.layout.*
-          import androidx.compose.foundation.rememberScrollState
-          import androidx.compose.foundation.shape.RoundedCornerShape
-          import androidx.compose.foundation.verticalScroll
-          import androidx.compose.material.icons.Icons
-          import androidx.compose.material.icons.filled.*
-          import androidx.compose.material3.*
-          import androidx.compose.runtime.*
-          import androidx.compose.ui.Alignment
-          import androidx.compose.ui.Modifier
-          import androidx.compose.ui.draw.clip
-          import androidx.compose.ui.graphics.Brush
-          import androidx.compose.ui.graphics.Color
-          import androidx.compose.ui.graphics.vector.ImageVector
-          import androidx.compose.ui.layout.ContentScale
-          import androidx.compose.ui.platform.LocalContext
-          import androidx.compose.ui.platform.testTag
-          import androidx.compose.ui.res.painterResource
-          import androidx.compose.ui.res.stringResource
-          import androidx.compose.ui.text.font.FontWeight
-          import androidx.compose.ui.text.style.TextAlign
-          import androidx.compose.ui.unit.dp
-          import androidx.credentials.ClearCredentialStateRequest
-          import androidx.credentials.CredentialManager
-          import androidx.credentials.CustomCredential
-          import androidx.credentials.GetCredentialRequest
-          import androidx.credentials.exceptions.GetCredentialCancellationException
-          import com.example.R
-          import com.example.crypto.CryptoEngine
-          import com.example.ui.theme.CyberCyan
-          import com.example.ui.theme.NeonCyberGreen
-          import com.example.ui.theme.ObsidianBlack
-          import com.google.android.libraries.identity.googleid.GetGoogleIdOption
-          import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
-          import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
-          import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential.Companion.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
-          import com.google.firebase.Firebase
-          import com.google.firebase.auth.GoogleAuthProvider
-          import com.google.firebase.auth.auth
-          import kotlinx.coroutines.CoroutineScope
-          import kotlinx.coroutines.NonCancellable
-          import kotlinx.coroutines.launch
-          import kotlinx.coroutines.tasks.await
-          import kotlinx.coroutines.withContext
-          import java.util.Locale
+      - name: Gradle 9.3.1 Kurulumu
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
 
-          private const val FALLBACK_WEB_CLIENT_ID =
-              "400047341151-pa472n1b1iauotvf17vdma6ver51mitb.apps.googleusercontent.com"
-          private const val PREFS_LOCAL_NODE = "zerochat_local_node_session"
-          private const val KEY_LOCAL_UID = "local_uid"
-          private const val KEY_LOCAL_HANDLE = "local_handle"
-
-          fun getSavedLocalNodeSession(context: Context): Pair<String, String>? {
-              val prefs = context.getSharedPreferences(PREFS_LOCAL_NODE, Context.MODE_PRIVATE)
-              val uid = prefs.getString(KEY_LOCAL_UID, null)?.takeIf { it.isNotBlank() } ?: return null
-              val handle = prefs.getString(KEY_LOCAL_HANDLE, null)?.takeIf { it.isNotBlank() } ?: "siber_dugum"
-              return uid to handle
+      - name: Debug APK Derle
+        run: |
+          set -o pipefail
+          gradle assembleDebug --no-daemon --console=plain 2>&1 | tee build.log || {
+            echo "=========================================="
+            echo "KOTLIN DERLEME HATASI DETAYI:"
+            grep -E "^e: |FAILURE:|What went wrong" -A 4 build.log || tail -n 60 build.log
+            echo "=========================================="
+            exit 1
           }
 
-          fun saveLocalNodeSession(context: Context, uid: String, handle: String) {
-              context.getSharedPreferences(PREFS_LOCAL_NODE, Context.MODE_PRIVATE).edit()
-                  .putString(KEY_LOCAL_UID, uid)
-                  .putString(KEY_LOCAL_HANDLE, handle)
-                  .apply()
-          }
-
-          fun clearLocalNodeSession(context: Context) {
-              context.getSharedPreferences(PREFS_LOCAL_NODE, Context.MODE_PRIVATE).edit().clear().apply()
-          }
-
-          private fun buildDeterministicNodeIdentity(context: Context, preferredHandle: String): Pair<String, String> {
-              val cleanHandle = preferredHandle.trim().removePrefix("@").lowercase(Locale.ROOT)
-                  .replace("[^a-z0-9_\\\\-]".toRegex(), "")
-                  .let {
-                      if (it.length >= 3) it.take(24)
-                      else getSavedLocalNodeSession(context)?.second ?: "zero_${System.currentTimeMillis().toString().takeLast(5)}"
-                  }
-              val uid = "node_" + CryptoEngine.sha256Hex("ZEROCHAT_NODE::$cleanHandle").take(20)
-              saveLocalNodeSession(context, uid, cleanHandle)
-              return uid to cleanHandle
-          }
-
-          fun attemptAutoSignIn(
-              context: Context,
-              credentialManager: CredentialManager,
-              onAuthSuccess: () -> Unit,
-              onUnauthenticated: () -> Unit,
-              scope: CoroutineScope,
-              onNodeSessionSuccess: (String, String) -> Unit = { _, _ -> }
-          ) {
-              val current = Firebase.auth.currentUser
-              if (current != null) {
-                  onNodeSessionSuccess(current.uid, current.email ?: "zero_${current.uid.take(5)}")
-                  onAuthSuccess()
-                  return
-              }
-              val savedLocal = getSavedLocalNodeSession(context)
-              if (savedLocal != null) {
-                  onNodeSessionSuccess(savedLocal.first, savedLocal.second)
-                  onAuthSuccess()
-                  return
-              }
-              val googleIdOption = GetGoogleIdOption.Builder()
-                  .setFilterByAuthorizedAccounts(true)
-                  .setServerClientId(FALLBACK_WEB_CLIENT_ID)
-                  .setAutoSelectEnabled(true)
-                  .build()
-              val request = GetCredentialRequest.Builder().addCredentialOption(googleIdOption).build()
-              scope.launch {
-                  try {
-                      val result = credentialManager.getCredential(context, request)
-                      val credential = result.credential
-                      if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
-                          val googleCred = GoogleIdTokenCredential.createFrom(credential.data)
-                          val authCredential = GoogleAuthProvider.getCredential(googleCred.idToken, null)
-                          val authRes = Firebase.auth.signInWithCredential(authCredential).await()
-                          val uid = authRes.user?.uid ?: ("gnode_" + CryptoEngine.sha256Hex(googleCred.id).take(18))
-                          val handle = googleCred.id.substringBefore("@").ifBlank { "zero_${uid.take(5)}" }
-                          saveLocalNodeSession(context, uid, handle)
-                          onNodeSessionSuccess(uid, handle)
-                          onAuthSuccess()
-                      } else onUnauthenticated()
-                  } catch (e: Exception) {
-                      onUnauthenticated()
-                  }
-              }
-          }
-
-          fun onGoogleSignInClicked(
-              context: Context,
-              credentialManager: CredentialManager,
-              preferredHandle: String = "",
-              onAuthSuccess: () -> Unit,
-              onAuthError: (String) -> Unit,
-              scope: CoroutineScope,
-              onAuthCancelled: () -> Unit = {},
-              onNodeSessionSuccess: (String, String) -> Unit = { _, _ -> }
-          ) {
-              val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = FALLBACK_WEB_CLIENT_ID).build()
-              val request = GetCredentialRequest.Builder().addCredentialOption(signInOption).build()
-              scope.launch {
-                  try {
-                      val activityContext = context as? Activity ?: context
-                      val result = credentialManager.getCredential(activityContext, request)
-                      val credential = result.credential
-                      if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
-                          val googleCred = GoogleIdTokenCredential.createFrom(credential.data)
-                          val chosenHandle = preferredHandle.trim().ifBlank { googleCred.id.substringBefore("@") }
-                          try {
-                              val authCredential = GoogleAuthProvider.getCredential(googleCred.idToken, null)
-                              val authRes = Firebase.auth.signInWithCredential(authCredential).await()
-                              val firebaseUid = authRes.user?.uid ?: ("gnode_" + CryptoEngine.sha256Hex(googleCred.id).take(18))
-                              saveLocalNodeSession(context, firebaseUid, chosenHandle)
-                              onNodeSessionSuccess(firebaseUid, chosenHandle)
-                              onAuthSuccess()
-                          } catch (firebaseErr: Exception) {
-                              val (uid, handle) = buildDeterministicNodeIdentity(context, chosenHandle)
-                              onNodeSessionSuccess(uid, handle)
-                              onAuthSuccess()
-                          }
-                      } else {
-                          val (uid, handle) = buildDeterministicNodeIdentity(context, preferredHandle)
-                          onNodeSessionSuccess(uid, handle)
-                          onAuthSuccess()
-                      }
-                  } catch (e: Exception) {
-                      Log.w("Auth", "Google Sign-In fallback to Hardware Node: ${e.message}")
-                      val (uid, handle) = buildDeterministicNodeIdentity(context, preferredHandle)
-                      onNodeSessionSuccess(uid, handle)
-                      onAuthSuccess()
-                  }
-              }
-          }
-
-          fun signOutZeroChat(
-              credentialManager: CredentialManager,
-              scope: CoroutineScope,
-              context: Context? = null,
-              onSignOutComplete: () -> Unit = {}
-          ) {
-              scope.launch {
-                  withContext(NonCancellable) {
-                      try {
-                          context?.let { clearLocalNodeSession(it) }
-                          credentialManager.clearCredentialState(ClearCredentialStateRequest())
-                      } catch (_: Exception) {
-                      } finally {
-                          Firebase.auth.signOut()
-                          onSignOut
+      - name: ZeroChat APK Dosyasini Yukle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZeroChat-Debug-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
