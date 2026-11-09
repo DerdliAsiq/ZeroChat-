@@ -31,7 +31,7 @@ jobs:
           "$SDKMANAGER" "platform-tools" "platforms;android-36" "build-tools;36.0.0" || true
           "$SDKMANAGER" "platforms;android-36.1" || true
 
-      - name: Ortam, Keystore ve Kod Senkronizasyonu
+      - name: Ortam, Keystore, Firebase ve Kod Senkronizasyonu
         run: |
           if [ ! -f ".env" ]; then
             if [ -f ".env.example" ]; then
@@ -46,8 +46,58 @@ jobs:
             keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           fi
           python3 - << 'EOF'
-          import os, re
+          import os, re, base64
           from pathlib import Path
+
+          # 0) GitHub export sirasinda cikarilan app/google-services.json dosyasini olustur
+          gs_path = Path("app/google-services.json")
+          if not gs_path.exists():
+              gs_b64 = (
+                  "ewogICJwcm9qZWN0X2luZm8iOiB7CiAgICAicHJvamVjdF9udW1iZXIiOiAiNDAwMDQ3MzQxMTUxIiwK"
+                  "ICAgICJwcm9qZWN0X2lkIjogImdlbi1sYW5nLWNsaWVudC0wMDcwOTgzNTI0IiwKICAgICJzdG9yYWdl"
+                  "X2J1Y2tldCI6ICJnZW4tbGFuZy1jbGllbnQtMDA3MDk4MzUyNC5maXJlYmFzZXN0b3JhZ2UuYXBwIgog"
+                  "IH0sCiAgImNsaWVudCI6IFsKICAgIHsKICAgICAgImNsaWVudF9pbmZvIjogewogICAgICAgICJtb2Jp"
+                  "bGVzZGtfYXBwX2lkIjogIjE6NDAwMDQ3MzQxMTUxOmFuZHJvaWQ6ZTAzNTY3ZTgzMDZiYmE1ZDkxMjVl"
+                  "YSIsCiAgICAgICAgImFuZHJvaWRfY2xpZW50X2luZm8iOiB7CiAgICAgICAgICAicGFja2FnZV9uYW1l"
+                  "IjogImNvbS5haXN0dWRpby56ZXJvY2hhdC54a3ZxIgogICAgICAgIH0KICAgICAgfSwKICAgICAgIm9h"
+                  "dXRoX2NsaWVudCI6IFsKICAgICAgICB7CiAgICAgICAgICAiY2xpZW50X2lkIjogIjQwMDA0NzM0MTE1"
+                  "MS10cmlldnFndDdja2sxcTF1ajdibjJtbDg3bGI3Zm82ai5hcHBzLmdvb2dsZXVzZXJjb250ZW50LmNv"
+                  "bSIsCiAgICAgICAgICAiY2xpZW50X3R5cGUiOiAxLAogICAgICAgICAgImFuZHJvaWRfaW5mbyI6IHsK"
+                  "ICAgICAgICAgICAgInBhY2thZ2VfbmFtZSI6ICJjb20uYWlzdHVkaW8uemVyb2NoYXQueGt2cSIsCiAg"
+                  "ICAgICAgICAgICJjZXJ0aWZpY2F0ZV9oYXNoIjogImE3MzFjOGI5MWUwMWFlY2U1YjFiNzFkYzU5ODc3"
+                  "NjY3NGEzNDk2YTAiCiAgICAgICAgICB9CiAgICAgICAgfSwKICAgICAgICB7CiAgICAgICAgICAiY2xp"
+                  "ZW50X2lkIjogIjQwMDA0NzM0MTE1MS1wYTQ3Mm4xYjFpYXVvdHZmMTd2ZG1hNnZlcjUxbWl0Yi5hcHBz"
+                  "Lmdvb2dsZXVzZXJjb250ZW50LmNvbSIsCiAgICAgICAgICAiY2xpZW50X3R5cGUiOiAzCiAgICAgICAg"
+                  "fQogICAgICBdLAogICAgICAiYXBpX2tleSI6IFsKICAgICAgICB7CiAgICAgICAgICAiY3VycmVudF9r"
+                  "ZXkiOiAiQUl6YVN5QTJDclR0SkFZVklTVW1reEIxNDdNOWY5SlFwUHpWakFjIgogICAgICAgIH0KICAg"
+                  "ICAgXSwKICAgICAgInNlcnZpY2VzIjogewogICAgICAgICJhcHBpbnZpdGVfc2VydmljZSI6IHsKICAg"
+                  "ICAgICAgICJvdGhlcl9wbGF0Zm9ybV9vYXV0aF9jbGllbnQiOiBbCiAgICAgICAgICAgIHsKICAgICAg"
+                  "ICAgICAgICAiY2xpZW50X2lkIjogIjQwMDA0NzM0MTE1MS1wYTQ3Mm4xYjFpYXVvdHZmMTd2ZG1hNnZl"
+                  "cjUxbWl0Yi5hcHBzLmdvb2dsZXVzZXJjb250ZW50LmNvbSIsCiAgICAgICAgICAgICAgImNsaWVudF90"
+                  "eXBlIjogMwogICAgICAgICAgICB9CiAgICAgICAgICBdCiAgICAgICAgfQogICAgICB9CiAgICB9CiAg"
+                  "XSwKICAiY29uZmlndXJhdGlvbl92ZXJzaW9uIjogIjEiCn0="
+              )
+              gs_path.write_bytes(base64.b64decode(gs_b64))
+
+          # AuthScreen.kt icindeki R.string.default_web_client_id referansini dogrudan guvenli sabit ile degistir
+          auth_kt = Path("app/src/main/java/com/example/ui/auth/AuthScreen.kt")
+          if auth_kt.exists():
+              atxt = auth_kt.read_text(encoding="utf-8")
+              atxt = atxt.replace(
+                  "context.getString(R.string.default_web_client_id)",
+                  '"400047341151-pa472n1b1iauotvf17vdma6ver51mitb.apps.googleusercontent.com"'
+              )
+              auth_kt.write_text(atxt, encoding="utf-8")
+
+          fb_cfg = Path("app/src/main/res/values/firebase_applet_config.xml")
+          if not fb_cfg.exists():
+              fb_cfg.write_text(
+                  '<?xml version="1.0" encoding="utf-8" standalone="no"?>\n'
+                  '<resources>\n'
+                  '    <string name="firestore_database_id" translatable="false">ai-studio-android-zerochat-157b48f2-6079-4afa-9173-4eebd46edd97</string>\n'
+                  '</resources>\n',
+                  encoding="utf-8"
+              )
 
           # 1) ZeroChatModels.kt icine participantHandles ozelligi ekle (eger yoksa)
           models_kt = Path("app/src/main/java/com/example/data/model/ZeroChatModels.kt")
@@ -59,7 +109,6 @@ jobs:
                       "val defaultTtlSeconds: Long = 0L,\n    val participantHandles: List<String> = emptyList(),"
                   )
                   models_kt.write_text(mtxt, encoding="utf-8")
-                  print("Added participantHandles to ChatRoom")
 
           # 2) LocalVaultDatabase.kt icine decryptedPreview extension ekle (eger yoksa)
           vault_kt = Path("app/src/main/java/com/example/data/local/LocalVaultDatabase.kt")
@@ -68,7 +117,6 @@ jobs:
               if "decryptedPreview" not in vtxt:
                   vtxt = vtxt + "\nval ScheduledEnvelopeEntity.decryptedPreview: String get() = plaintext\n"
                   vault_kt.write_text(vtxt, encoding="utf-8")
-                  print("Added decryptedPreview extension to ScheduledEnvelopeEntity")
 
           # 3) Tum Kotlin dosyalarinda sched.decryptedPreview referansini duzelt
           for kt_path in Path("app/src/main/java").rglob("*.kt"):
@@ -76,7 +124,6 @@ jobs:
               new_txt = txt.replace("sched.decryptedPreview", "sched.plaintext")
               if new_txt != txt:
                   kt_path.write_text(new_txt, encoding="utf-8")
-                  print(f"Patched decryptedPreview in {kt_path}")
 
           # 4) MainActivity.kt icinde onSelectPeerForChat imzasi eski kalmissa duzelt
           main_kt = Path("app/src/main/java/com/example/MainActivity.kt")
@@ -96,7 +143,6 @@ jobs:
                   )
                   if mtxt2 != mtxt:
                       main_kt.write_text(mtxt2, encoding="utf-8")
-                      print("Patched onSelectPeerForChat in MainActivity.kt")
 
           # 5) Eger GitHub runner'da android-36.1 SDK paketi yoksa compileSdk = 36 yap
           sdk_root = os.environ.get("ANDROID_HOME", "/usr/local/lib/android/sdk")
