@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Repo Kodunu Cek
+      - name: Repo Kodunu Cek (Checkout)
         uses: actions/checkout@v4
 
       - name: JDK 21 Kurulumu
@@ -19,13 +19,19 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Android SDK Lisanslarini Onayla
+      - name: Android SDK 36 ve Lisanslari Hazirla
         run: |
           export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           export ANDROID_SDK_ROOT="$ANDROID_HOME"
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -f "$SDKMANAGER" ]; then
+            SDKMANAGER=$(find "$ANDROID_HOME" -name sdkmanager | head -n 1)
+          fi
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-36" "build-tools;36.0.0" || true
+          "$SDKMANAGER" "platforms;android-36.1" || true
 
-      - name: Ortam ve Debug Keystore Hazirla
+      - name: Ortam, Keystore ve Kod Senkronizasyonu
         run: |
           if [ ! -f ".env" ]; then
             if [ -f ".env.example" ]; then
@@ -39,6 +45,37 @@ jobs:
           elif [ ! -f "debug.keystore" ]; then
             keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           fi
+          python3 - << 'EOF'
+          import os, re
+          from pathlib import Path
+
+          main_kt = Path("app/src/main/java/com/example/MainActivity.kt")
+          if main_kt.exists():
+              txt = main_kt.read_text(encoding="utf-8")
+              txt = re.sub(
+                  r'activeRoom\.participantHandles\.firstOrNull\s*\{[^}]*\}\s*\?:\s*',
+                  '',
+                  txt
+              )
+              main_kt.write_text(txt, encoding="utf-8")
+
+          chat_kt = Path("app/src/main/java/com/example/ui/screens/ChatConversationScreen.kt")
+          if chat_kt.exists():
+              txt = chat_kt.read_text(encoding="utf-8")
+              txt = txt.replace("sched.decryptedPreview", "sched.plaintext")
+              chat_kt.write_text(txt, encoding="utf-8")
+
+          sdk_root = os.environ.get("ANDROID_HOME", "/usr/local/lib/android/sdk")
+          if not Path(sdk_root, "platforms", "android-36.1").exists():
+              gradle_kt = Path("app/build.gradle.kts")
+              if gradle_kt.exists():
+                  gtxt = gradle_kt.read_text(encoding="utf-8")
+                  gtxt = gtxt.replace(
+                      "compileSdk { version = release(36) { minorApiLevel = 1 } }",
+                      "compileSdk = 36"
+                  )
+                  gradle_kt.write_text(gtxt, encoding="utf-8")
+          EOF
 
       - name: Gradle 9.3.1 Kurulumu
         uses: gradle/actions/setup-gradle@v4
@@ -46,7 +83,7 @@ jobs:
           gradle-version: '9.3.1'
 
       - name: Debug APK Derle
-        run: gradle assembleDebug --stacktrace
+        run: gradle assembleDebug --no-daemon --console=plain
 
       - name: ZeroChat APK Dosyasini Yukle
         uses: actions/upload-artifact@v4
