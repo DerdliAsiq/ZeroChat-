@@ -2,11 +2,11 @@ package com.example.ui.auth
 
 import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.util.Log
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -25,7 +25,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AlternateEmail
-import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Shield
@@ -35,10 +34,8 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
@@ -65,12 +62,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.credentials.ClearCredentialStateRequest
+import androidx.credentials.Credential
 import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
+import androidx.credentials.exceptions.GetCredentialException
+import androidx.credentials.exceptions.NoCredentialException
 import com.example.R
-import com.example.crypto.CryptoEngine
 import com.example.ui.theme.CyberCyan
 import com.example.ui.theme.NeonCyberGreen
 import com.example.ui.theme.ObsidianBlack
@@ -88,18 +87,26 @@ import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import java.util.Locale
 
-private const val FALLBACK_WEB_CLIENT_ID =
-    "400047341151-pa472n1b1iauotvf17vdma6ver51mitb.apps.googleusercontent.com"
-
 private const val PREFS_LOCAL_NODE = "zerochat_local_node_session"
 private const val KEY_LOCAL_UID = "local_uid"
 private const val KEY_LOCAL_HANDLE = "local_handle"
 
+private fun Context.findActivity(): Activity? {
+    var ctx: Context? = this
+    while (ctx is ContextWrapper) {
+        if (ctx is Activity) return ctx
+        ctx = ctx.baseContext
+    }
+    return null
+}
+
 fun getSavedLocalNodeSession(context: Context): Pair<String, String>? {
+    val currentFirebaseUser = Firebase.auth.currentUser ?: return null
     val prefs = context.getSharedPreferences(PREFS_LOCAL_NODE, Context.MODE_PRIVATE)
-    val uid = prefs.getString(KEY_LOCAL_UID, null)?.takeIf { it.isNotBlank() } ?: return null
-    val handle = prefs.getString(KEY_LOCAL_HANDLE, null)?.takeIf { it.isNotBlank() } ?: "siber_dugum"
-    return uid to handle
+    val savedHandle = prefs.getString(KEY_LOCAL_HANDLE, null)?.takeIf { it.isNotBlank() }
+    val fallbackHandle = currentFirebaseUser.email?.substringBefore("@")
+        ?: "zero_${currentFirebaseUser.uid.take(6)}"
+    return currentFirebaseUser.uid to (savedHandle ?: fallbackHandle)
 }
 
 fun saveLocalNodeSession(context: Context, uid: String, handle: String) {
@@ -115,30 +122,43 @@ fun clearLocalNodeSession(context: Context) {
     prefs.edit().clear().apply()
 }
 
-private fun resolveWebClientId(context: Context): String {
-    val resId = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
-    return if (resId != 0) {
-        runCatching { context.getString(resId) }.getOrDefault(FALLBACK_WEB_CLIENT_ID)
-    } else {
-        FALLBACK_WEB_CLIENT_ID
-    }
-}
-
-private fun buildDeterministicNodeIdentity(context: Context, preferredHandle: String): Pair<String, String> {
-    val cleanHandle = preferredHandle.trim()
-        .removePrefix("@")
-        .lowercase(Locale.ROOT)
-        .replace("[^a-z0-9_\\-]".toRegex(), "")
-        .let {
-            if (it.length >= 3) it.take(24)
-            else {
-                val existing = getSavedLocalNodeSession(context)?.second
-                if (!existing.isNullOrBlank()) existing else "zero_${System.currentTimeMillis().toString().takeLast(5)}"
+private suspend fun exchangeGoogleCredentialWithFirebase(
+    context: Context,
+    credential: Credential,
+    preferredHandle: String,
+    onNodeSessionSuccess: (String, String) -> Unit,
+    onAuthSuccess: () -> Unit,
+    onAuthError: (String) -> Unit
+) {
+    if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
+        val googleIdTokenCredential = GoogleIdTokenCredential.createFrom(credential.data)
+        val googleIdToken = googleIdTokenCredential.idToken
+        val googleEmail = googleIdTokenCredential.id
+        val firebaseCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
+        val authResult = Firebase.auth.signInWithCredential(firebaseCredential).await()
+        val firebaseUser = authResult.user
+        if (firebaseUser != null) {
+            val cleanPreferred = preferredHandle.trim()
+                .removePrefix("@")
+                .lowercase(Locale.ROOT)
+                .replace("[^a-z0-9_\\-]".toRegex(), "")
+            val finalHandle = if (cleanPreferred.length >= 3) {
+                cleanPreferred.take(24)
+            } else {
+                googleEmail.substringBefore("@")
+                    .lowercase(Locale.ROOT)
+                    .replace("[^a-z0-9_\\-]".toRegex(), "")
+                    .ifBlank { "zero_${firebaseUser.uid.take(6)}" }
             }
+            saveLocalNodeSession(context, firebaseUser.uid, finalHandle)
+            onNodeSessionSuccess(firebaseUser.uid, finalHandle)
+            onAuthSuccess()
+        } else {
+            onAuthError("Firebase oturumu oluşturulamadı. Lütfen tekrar deneyin.")
         }
-    val uid = "node_" + CryptoEngine.sha256Hex("ZEROCHAT_NODE::$cleanHandle").take(20)
-    saveLocalNodeSession(context, uid, cleanHandle)
-    return uid to cleanHandle
+    } else {
+        onAuthError("Geçersiz Google kimlik bilgisi türü alındı.")
+    }
 }
 
 fun attemptAutoSignIn(
@@ -151,45 +171,46 @@ fun attemptAutoSignIn(
 ) {
     val current = Firebase.auth.currentUser
     if (current != null) {
-        onNodeSessionSuccess(current.uid, current.email ?: "zero_${current.uid.take(5)}")
+        val savedHandle = getSavedLocalNodeSession(context)?.second
+            ?: current.email?.substringBefore("@")
+            ?: "zero_${current.uid.take(6)}"
+        onNodeSessionSuccess(current.uid, savedHandle)
         onAuthSuccess()
         return
-    }
-    val savedLocal = getSavedLocalNodeSession(context)
-    if (savedLocal != null) {
-        onNodeSessionSuccess(savedLocal.first, savedLocal.second)
-        onAuthSuccess()
-        return
+    } else {
+        // Clear any stale non-Firebase local session so user signs in cleanly with Google
+        clearLocalNodeSession(context)
     }
 
-    val clientId = resolveWebClientId(context)
+    val clientId = context.getString(R.string.default_web_client_id)
+    val activityContext = context.findActivity() ?: context
     val googleIdOption = GetGoogleIdOption.Builder()
         .setFilterByAuthorizedAccounts(true)
         .setServerClientId(clientId)
         .setAutoSelectEnabled(true)
         .build()
 
-    val request = GetCredentialRequest.Builder().addCredentialOption(googleIdOption).build()
+    val request = GetCredentialRequest.Builder()
+        .addCredentialOption(googleIdOption)
+        .build()
 
     scope.launch {
         try {
-            val result = credentialManager.getCredential(context, request)
-            val credential = result.credential
-            if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
-                val googleCred = GoogleIdTokenCredential.createFrom(credential.data)
-                val googleIdToken = googleCred.idToken
-                val emailOrId = googleCred.id
-                val authCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
-                val authResult = Firebase.auth.signInWithCredential(authCredential).await()
-                val uid = authResult.user?.uid ?: ("gnode_" + CryptoEngine.sha256Hex(emailOrId).take(18))
-                val handle = emailOrId.substringBefore("@").ifBlank { "zero_${uid.take(5)}" }
-                saveLocalNodeSession(context, uid, handle)
-                onNodeSessionSuccess(uid, handle)
-                onAuthSuccess()
-            } else {
-                onUnauthenticated()
-            }
+            val result = credentialManager.getCredential(activityContext, request)
+            exchangeGoogleCredentialWithFirebase(
+                context = context,
+                credential = result.credential,
+                preferredHandle = "",
+                onNodeSessionSuccess = onNodeSessionSuccess,
+                onAuthSuccess = onAuthSuccess,
+                onAuthError = { onUnauthenticated() }
+            )
+        } catch (e: NoCredentialException) {
+            onUnauthenticated()
+        } catch (e: GetCredentialCancellationException) {
+            onUnauthenticated()
         } catch (e: Exception) {
+            Log.w("Auth", "Auto sign-in skipped: ${e.message}")
             onUnauthenticated()
         }
     }
@@ -205,52 +226,57 @@ fun onGoogleSignInClicked(
     onAuthCancelled: () -> Unit = {},
     onNodeSessionSuccess: (String, String) -> Unit = { _, _ -> }
 ) {
-    val clientId = resolveWebClientId(context)
+    val clientId = context.getString(R.string.default_web_client_id)
+    val activityContext = context.findActivity() ?: context
+
     val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()
-    val request = GetCredentialRequest.Builder().addCredentialOption(signInOption).build()
+    val primaryRequest = GetCredentialRequest.Builder()
+        .addCredentialOption(signInOption)
+        .build()
 
     scope.launch {
         try {
-            val activityContext = context as? Activity ?: context
-            val result = credentialManager.getCredential(activityContext, request)
-            val credential = result.credential
-            if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
-                val googleCred = GoogleIdTokenCredential.createFrom(credential.data)
-                val googleIdToken = googleCred.idToken
-                val googleAccountEmail = googleCred.id
-                val chosenHandle = preferredHandle.trim().ifBlank {
-                    googleAccountEmail.substringBefore("@")
-                }
-                try {
-                    val authCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
-                    val authRes = Firebase.auth.signInWithCredential(authCredential).await()
-                    val firebaseUid = authRes.user?.uid
-                        ?: ("gnode_" + CryptoEngine.sha256Hex(googleAccountEmail).take(18))
-                    saveLocalNodeSession(context, firebaseUid, chosenHandle)
-                    onNodeSessionSuccess(firebaseUid, chosenHandle)
-                    onAuthSuccess()
-                } catch (firebaseErr: Exception) {
-                    Log.w("Auth", "Firebase credential exchange fallback activated: ${firebaseErr.message}")
-                    val (fallbackUid, fallbackHandle) = buildDeterministicNodeIdentity(context, chosenHandle)
-                    onNodeSessionSuccess(fallbackUid, fallbackHandle)
-                    onAuthSuccess()
-                }
-            } else {
-                val (fallbackUid, fallbackHandle) = buildDeterministicNodeIdentity(context, preferredHandle)
-                onNodeSessionSuccess(fallbackUid, fallbackHandle)
-                onAuthSuccess()
-            }
+            val result = credentialManager.getCredential(activityContext, primaryRequest)
+            exchangeGoogleCredentialWithFirebase(
+                context = context,
+                credential = result.credential,
+                preferredHandle = preferredHandle,
+                onNodeSessionSuccess = onNodeSessionSuccess,
+                onAuthSuccess = onAuthSuccess,
+                onAuthError = onAuthError
+            )
         } catch (e: GetCredentialCancellationException) {
-            Log.w("Auth", "Google picker returned cancellation/SHA-1 mismatch, activating hardware node: ${e.message}")
-            // Hesap secildikten sonra OAuth SHA-1 / Play Services kisitlamasi nedeniyle kapanirsa takilmadan dugumu baslat
-            val (fallbackUid, fallbackHandle) = buildDeterministicNodeIdentity(context, preferredHandle)
-            onNodeSessionSuccess(fallbackUid, fallbackHandle)
-            onAuthSuccess()
+            Log.i("Auth", "User cancelled Google Sign-In")
+            onAuthCancelled()
+        } catch (primaryErr: GetCredentialException) {
+            Log.w("Auth", "GetSignInWithGoogleOption failed (${primaryErr.message}), trying GetGoogleIdOption fallback")
+            try {
+                val fallbackGoogleIdOption = GetGoogleIdOption.Builder()
+                    .setFilterByAuthorizedAccounts(false)
+                    .setServerClientId(clientId)
+                    .setAutoSelectEnabled(false)
+                    .build()
+                val fallbackRequest = GetCredentialRequest.Builder()
+                    .addCredentialOption(fallbackGoogleIdOption)
+                    .build()
+                val fallbackResult = credentialManager.getCredential(activityContext, fallbackRequest)
+                exchangeGoogleCredentialWithFirebase(
+                    context = context,
+                    credential = fallbackResult.credential,
+                    preferredHandle = preferredHandle,
+                    onNodeSessionSuccess = onNodeSessionSuccess,
+                    onAuthSuccess = onAuthSuccess,
+                    onAuthError = onAuthError
+                )
+            } catch (cancelErr: GetCredentialCancellationException) {
+                onAuthCancelled()
+            } catch (fallbackErr: Exception) {
+                Log.e("Auth", "Google Sign-In failed", fallbackErr)
+                onAuthError("Google ile giriş yapılamadı: ${fallbackErr.localizedMessage ?: primaryErr.localizedMessage ?: "Bilinmeyen hata"}")
+            }
         } catch (e: Exception) {
-            Log.w("Auth", "Google Sign-In fallback to Hardware Node: ${e.message}", e)
-            val (fallbackUid, fallbackHandle) = buildDeterministicNodeIdentity(context, preferredHandle)
-            onNodeSessionSuccess(fallbackUid, fallbackHandle)
-            onAuthSuccess()
+            Log.e("Auth", "Unexpected error during Google Sign-In", e)
+            onAuthError("Giriş hatası: ${e.localizedMessage ?: "Lütfen internet bağlantınızı kontrol edin."}")
         }
     }
 }
@@ -311,7 +337,6 @@ fun AuthScreen(
                 .padding(horizontal = 20.dp, vertical = 14.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            // Compact Top Hero Banner so the Login Buttons are immediately visible at the top!
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -350,7 +375,7 @@ fun AuthScreen(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "ZERO-KNOWLEDGE PROTOCOL v2.5",
+                            text = "ZERO-KNOWLEDGE PROTOCOL v3.0",
                             style = MaterialTheme.typography.labelSmall,
                             color = NeonCyberGreen
                         )
@@ -372,7 +397,6 @@ fun AuthScreen(
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            // PRIMARY ACTION CARD — Positioned right at the top/center (Above the Fold!)
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(22.dp),
@@ -395,13 +419,42 @@ fun AuthScreen(
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "Google hesabınızla veya doğrudan @kullanici_adi belirleyerek ECDH P-256 + AES-256-GCM anahtar çiftinizi oluşturun.",
+                        text = "Google hesabınızla giriş yaparak gerçek zamanlı Firestore bulut dizinine bağlanın ve cihazınızın donanım ECDH P-256 + AES-256-GCM anahtar çiftini etkinleştirin.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = TextAlign.Center
                     )
 
-                    Spacer(modifier = Modifier.height(14.dp))
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    OutlinedTextField(
+                        value = customHandleInput,
+                        onValueChange = { customHandleInput = it },
+                        placeholder = {
+                            Text(
+                                text = "İsteğe bağlı @kullanici_adi (örn: siber_kurt)",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.AlternateEmail,
+                                contentDescription = null,
+                                tint = CyberCyan
+                            )
+                        },
+                        singleLine = true,
+                        shape = RoundedCornerShape(14.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = CyberCyan,
+                            unfocusedBorderColor = MaterialTheme.colorScheme.outline
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("custom_handle_input")
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
 
                     if (errorMessage != null) {
                         Card(
@@ -421,7 +474,6 @@ fun AuthScreen(
                         }
                     }
 
-                    // Primary Google Sign-In Button — Immediately visible!
                     Button(
                         onClick = {
                             errorMessage = null
@@ -464,7 +516,7 @@ fun AuthScreen(
                             )
                             Spacer(modifier = Modifier.width(10.dp))
                             Text(
-                                text = "Kriptografik Düğüm Açılıyor...",
+                                text = "Google & Firestore Bağlanıyor...",
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.Bold
                             )
@@ -482,77 +534,6 @@ fun AuthScreen(
                             )
                         }
                     }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f))
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    // Instant @kullanici_adi Node Input & Quick Launch
-                    OutlinedTextField(
-                        value = customHandleInput,
-                        onValueChange = { customHandleInput = it },
-                        placeholder = {
-                            Text(
-                                text = "İsteğe bağlı @kullanici_adi (örn: siber_kurt)",
-                                style = MaterialTheme.typography.bodySmall
-                            )
-                        },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Default.AlternateEmail,
-                                contentDescription = null,
-                                tint = CyberCyan
-                            )
-                        },
-                        singleLine = true,
-                        shape = RoundedCornerShape(14.dp),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = CyberCyan,
-                            unfocusedBorderColor = MaterialTheme.colorScheme.outline
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("custom_handle_input")
-                    )
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    OutlinedButton(
-                        onClick = {
-                            isLoading = true
-                            val (uid, handle) = buildDeterministicNodeIdentity(
-                                context = context,
-                                preferredHandle = customHandleInput.ifBlank { "siber_dugum" }
-                            )
-                            isLoading = false
-                            onNodeSessionSuccess(uid, handle)
-                            onAuthSuccess()
-                        },
-                        enabled = !isLoading,
-                        shape = RoundedCornerShape(14.dp),
-                        border = BorderStroke(1.dp, CyberCyan),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(48.dp)
-                            .testTag("quick_node_start_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Bolt,
-                            contentDescription = null,
-                            tint = CyberCyan,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = if (customHandleInput.isNotBlank()) {
-                                "@${customHandleInput.trim().removePrefix("@")} Olarak Hızlı Başlat"
-                            } else {
-                                "⚡ Cihaz Anahtarı İle Hızlı Düğüm Başlat"
-                            },
-                            color = CyberCyan,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
                 }
             }
 
@@ -566,14 +547,14 @@ fun AuthScreen(
             Spacer(modifier = Modifier.height(8.dp))
             FeatureSpecCard(
                 icon = Icons.Default.Key,
-                title = "@kullanici_adi ile Küresel P2P Keşif & Onay",
-                description = "Telefon numarası paylaşmadan kullanıcı adı ile eşleşin; takip/iletişim onayı olmadan kimse size yazamaz."
+                title = "@kullanici_adi ile Küresel P2P Keşif",
+                description = "Telefon numarası paylaşmadan kullanıcı adı veya canlı kamera QR kodu ile eşleşin ve anında şifreli mesajlaşın."
             )
             Spacer(modifier = Modifier.height(8.dp))
             FeatureSpecCard(
                 icon = Icons.Default.VisibilityOff,
-                title = "Süreli Mesajlar & Sahte Panik PIN Kodu",
-                description = "Okunduktan sonra kendini imha eden mesajlar ve acil durum gizleme kasası."
+                title = "Donanım Biyometrik Kasa & Süreli İmha",
+                description = "Gerçek parmak izi sensörü ile korunan gizli kasa ve okunduktan sonra kendini imha eden mesajlar."
             )
             Spacer(modifier = Modifier.height(12.dp))
         }

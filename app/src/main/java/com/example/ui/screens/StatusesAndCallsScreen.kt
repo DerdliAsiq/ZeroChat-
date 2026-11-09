@@ -77,6 +77,7 @@ import com.example.ui.theme.CyberCyan
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.NeonCyberGreen
 import com.example.ui.theme.ObsidianBlack
+import com.example.util.LiveVideoCallCameraPreview
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -588,50 +589,77 @@ fun CallsTabScreen(
 
         Spacer(modifier = Modifier.height(12.dp))
 
-        // Incoming Call Ringing Test / Simulation Card
+        var directDialHandle by remember { mutableStateOf("") }
+
+        // Direct @username P2P Encrypted Dialer Card
         Card(
             shape = RoundedCornerShape(16.dp),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            border = BorderStroke(1.dp, CyberCyan.copy(alpha = 0.6f)),
+            border = BorderStroke(1.dp, NeonCyberGreen.copy(alpha = 0.6f)),
             modifier = Modifier.fillMaxWidth()
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                    Icon(
-                        imageVector = Icons.Default.NotificationsActive,
-                        contentDescription = null,
-                        tint = CyberCyan,
-                        modifier = Modifier.size(22.dp)
+            Column(modifier = Modifier.padding(14.dp)) {
+                Text(
+                    text = "Doğrudan @kullanici_adi İle Şifreli P2P Arama",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = NeonCyberGreen,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedTextField(
+                        value = directDialHandle,
+                        onValueChange = { directDialHandle = it },
+                        placeholder = { Text("@kullanici_adi yazın...") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("direct_call_handle_input")
                     )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Column {
-                        Text(
-                            text = "Canlı Gelen Arama Karşılayıcısı",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = "Gelen şifreli P2P zil ekranını test edin",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                    IconButton(
+                        onClick = {
+                            val clean = directDialHandle.trim().removePrefix("@").lowercase(Locale.ROOT)
+                            if (clean.isNotBlank()) {
+                                val matched = peers.firstOrNull { it.username.equals(clean, ignoreCase = true) }
+                                onStartCall(matched?.userId ?: "peer_$clean", clean, "AUDIO")
+                                directDialHandle = ""
+                            }
+                        },
+                        modifier = Modifier
+                            .size(48.dp)
+                            .background(NeonCyberGreen.copy(alpha = 0.2f), CircleShape)
+                            .testTag("direct_audio_call_btn")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Call,
+                            contentDescription = "Sesli Ara",
+                            tint = NeonCyberGreen
                         )
                     }
-                }
-                OutlinedButton(
-                    onClick = {
-                        val caller = peers.firstOrNull()?.username ?: "siber_dugum"
-                        onSimulateIncomingCall(caller, "VIDEO")
-                    },
-                    border = BorderStroke(1.dp, NeonCyberGreen),
-                    modifier = Modifier.testTag("simulate_incoming_call_button")
-                ) {
-                    Text("Zil Çaldır", color = NeonCyberGreen, fontWeight = FontWeight.Bold)
+                    IconButton(
+                        onClick = {
+                            val clean = directDialHandle.trim().removePrefix("@").lowercase(Locale.ROOT)
+                            if (clean.isNotBlank()) {
+                                val matched = peers.firstOrNull { it.username.equals(clean, ignoreCase = true) }
+                                onStartCall(matched?.userId ?: "peer_$clean", clean, "VIDEO")
+                                directDialHandle = ""
+                            }
+                        },
+                        modifier = Modifier
+                            .size(48.dp)
+                            .background(CyberCyan.copy(alpha = 0.2f), CircleShape)
+                            .testTag("direct_video_call_btn")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Videocam,
+                            contentDescription = "Görüntülü Ara",
+                            tint = CyberCyan
+                        )
+                    }
                 }
             }
         }
@@ -918,37 +946,11 @@ fun ActiveP2PCallOverlay(
                     )
                     Spacer(modifier = Modifier.height(14.dp))
                     if (isVideoEnabled) {
-                        Surface(
-                            shape = RoundedCornerShape(14.dp),
-                            color = ObsidianBlack,
-                            border = BorderStroke(1.dp, CyberCyan.copy(alpha = 0.6f)),
+                        LiveVideoCallCameraPreview(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(110.dp)
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    Icon(
-                                        imageVector = Icons.Default.Videocam,
-                                        contentDescription = null,
-                                        tint = CyberCyan,
-                                        modifier = Modifier.size(28.dp)
-                                    )
-                                    Spacer(modifier = Modifier.height(4.dp))
-                                    Text(
-                                        text = "P2P ŞİFRELİ VİDEO AKIŞI AKTİF • 1080p VP9 + SRTP",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = CyberCyan
-                                    )
-                                    Text(
-                                        text = "ECDH P-256 Kare Doğrulaması: OK",
-                                        fontFamily = JetBrainsMonoFontFamily,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = NeonCyberGreen
-                                    )
-                                }
-                            }
-                        }
+                                .height(220.dp)
+                        )
                         Spacer(modifier = Modifier.height(10.dp))
                     }
                     Text(

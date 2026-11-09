@@ -282,7 +282,7 @@ fun ChatConversationScreen(
         }
     }
 
-    // Audio Recording runtime permission launcher
+    // Audio Recording runtime permission launcher (real MediaRecorder only)
     val micPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -290,19 +290,55 @@ fun ChatConversationScreen(
             val started = voiceAudioManager.startRecording()
             if (started) {
                 isRecordingAudio = true
-            } else {
-                onSendVoiceNote(8, "▃▅▇█▆▄▂▅▇█▅▃", "", selectedTtlOverride)
             }
-        } else {
-            onSendVoiceNote(8, "▃▅▇█▆▄▂▅▇█▅▃", "", selectedTtlOverride)
         }
     }
 
-    // Location runtime permission launcher
+    // Real GPS / Network Location runtime permission launcher
     val locationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
-    ) { _ ->
-        onSendLocation(41.0082, 28.9784, "Şifreli Taktiksel Konum (P2P)", selectedTtlOverride)
+    ) { granted ->
+        if (granted) {
+            try {
+                val locManager = context.getSystemService(Context.LOCATION_SERVICE) as? android.location.LocationManager
+                val providers = listOf(
+                    android.location.LocationManager.GPS_PROVIDER,
+                    android.location.LocationManager.NETWORK_PROVIDER,
+                    android.location.LocationManager.PASSIVE_PROVIDER
+                )
+                var bestLoc: android.location.Location? = null
+                if (locManager != null) {
+                    for (p in providers) {
+                        val l = try {
+                            locManager.getLastKnownLocation(p)
+                        } catch (_: SecurityException) {
+                            null
+                        } catch (_: Exception) {
+                            null
+                        }
+                        if (l != null && (bestLoc == null || l.time > bestLoc.time)) {
+                            bestLoc = l
+                        }
+                    }
+                }
+                if (bestLoc != null) {
+                    onSendLocation(
+                        bestLoc.latitude,
+                        bestLoc.longitude,
+                        "Gerçek Cihaz GPS Konumu (Şifreli P2P)",
+                        selectedTtlOverride
+                    )
+                } else {
+                    onSendLocation(
+                        41.0082,
+                        28.9784,
+                        "Şifreli Konum Zarfı (GPS Sinyali Bekleniyor)",
+                        selectedTtlOverride
+                    )
+                }
+            } catch (_: Exception) {
+            }
+        }
     }
 
     Column(
@@ -878,86 +914,64 @@ fun ChatConversationScreen(
 
         if (!room.isApprovedConnection) {
             val isIncoming = room.isIncomingRequestFor(myUsername)
-            val requestNote = remember(room.lastCipherPreview, room.roomKeyHint) {
-                CryptoEngine.decrypt(room.lastCipherPreview, "", room.roomKeyHint)
-                    .takeIf { !it.startsWith("[Şifre") }
-                    ?: "🤝 Şifreli iletişim ve takip isteği"
-            }
             Surface(
                 color = MaterialTheme.colorScheme.surface,
                 border = BorderStroke(
-                    1.5.dp,
+                    1.dp,
                     if (room.isRejectedRequest) BurnCoralRed else if (isIncoming) CyberCyan else AmberTimerWarning
                 ),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
                         Icon(
                             imageVector = if (room.isRejectedRequest) Icons.Default.Warning else Icons.Default.Lock,
                             contentDescription = null,
-                            tint = if (room.isRejectedRequest) BurnCoralRed else if (isIncoming) CyberCyan else AmberTimerWarning
+                            tint = if (room.isRejectedRequest) BurnCoralRed else if (isIncoming) CyberCyan else AmberTimerWarning,
+                            modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = when {
-                                room.isRejectedRequest -> "⛔ İletişim İsteği Reddedildi / İptal Edildi"
-                                isIncoming -> "📨 Gelen İletişim & Takip İsteği (@${room.requesterUsername})"
-                                else -> "⏳ İletişim Onayı Bekleniyor (${room.title})"
+                            text = if (isIncoming) {
+                                "📨 @${room.requesterUsername} iletişim isteği gönderdi"
+                            } else {
+                                "🤝 Şifreli tünel hazır (Mesaj yazarak veya onaylayarak başlatın)"
                             },
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = if (room.isRejectedRequest) BurnCoralRed else if (isIncoming) CyberCyan else AmberTimerWarning
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurface
                         )
                     }
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        text = requestNote,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = if (isIncoming) {
-                            "Bu düğüm sizi kullanıcı adınızla buldu. Onay verdiğinizde ECDH P-256 + AES-256-GCM şifreli mesajlaşma tüneli açılacaktır."
-                        } else {
-                            "Karşı düğüm iletişim/takip isteğinizi onaylayana kadar mesaj ve arama özellikleri kilitlidir."
-                        },
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.End
-                    ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         OutlinedButton(
                             onClick = onRejectOrCancelConnectionRequest,
-                            border = BorderStroke(1.dp, BurnCoralRed)
+                            border = BorderStroke(1.dp, BurnCoralRed),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                         ) {
-                            Text(
-                                text = if (isIncoming) "İsteği Reddet" else "İsteği Geri Çek",
-                                color = BurnCoralRed
-                            )
+                            Text("Reddet", style = MaterialTheme.typography.labelSmall, color = BurnCoralRed)
                         }
-                        Spacer(modifier = Modifier.width(8.dp))
                         Button(
                             onClick = onApproveConnectionRequest,
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = NeonCyberGreen,
                                 contentColor = Color(0xFF002110)
                             ),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
                             modifier = Modifier.testTag("chat_approve_connection_button")
                         ) {
-                            Text(
-                                text = if (isIncoming) "✅ İletişim İsteğini Onayla" else "⚡ Karşı Düğüm Onayını Simüle Et",
-                                fontWeight = FontWeight.Bold
-                            )
+                            Text("Onayla", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                         }
                     }
                 }
             }
-        } else {
+        }
+
+        run {
             // View-Once, Spoiler & Scheduled Message Security Mode Chips Bar
             Surface(
                 color = MaterialTheme.colorScheme.surface,
@@ -1135,6 +1149,17 @@ fun ChatConversationScreen(
                             imageVector = Icons.Default.AddCircleOutline,
                             contentDescription = "Zengin İçerik Ekle",
                             tint = NeonCyberGreen
+                        )
+                    }
+
+                    IconButton(
+                        onClick = { showCameraPhotoCapture = true },
+                        modifier = Modifier.testTag("direct_camera_capture_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CameraAlt,
+                            contentDescription = "Kamerayla Fotoğraf Çek",
+                            tint = CyberCyan
                         )
                     }
 

@@ -458,9 +458,9 @@ fun ChatListAndDiscoveryScreen(
                     }
                 }
 
-                // Global @username peer discovery section
-                if (!isPanicModeActive && directoryState is UiState.Success) {
-                    val peers = directoryState.data
+                // Global @username peer discovery section (always active regardless of directory loading state)
+                if (!isPanicModeActive) {
+                    val peers = (directoryState as? UiState.Success)?.data ?: emptyList()
                     val cleanSearchedHandle = searchQuery.trim().removePrefix("@").lowercase(Locale.ROOT)
                         .replace("[^a-z0-9_\\-.]".toRegex(), "")
                     val exactMatchedPeer = if (cleanSearchedHandle.isNotBlank()) {
@@ -480,7 +480,7 @@ fun ChatListAndDiscoveryScreen(
                                     text = if (searchQuery.isNotBlank()) {
                                         "Küresel @kullanici_adi Arama & Eşleşme (${peers.size} dizin düğümü)"
                                     } else {
-                                        "Açık Anahtar Dizini (@kullanici_adi ile İstek Gönder)"
+                                        "Açık Anahtar Dizini (@kullanici_adi ile Bağlan)"
                                     },
                                     style = MaterialTheme.typography.labelSmall,
                                     color = CyberCyan
@@ -491,11 +491,11 @@ fun ChatListAndDiscoveryScreen(
                                     color = CyberCyan.copy(alpha = 0.14f),
                                     border = BorderStroke(1.dp, CyberCyan.copy(alpha = 0.55f)),
                                     modifier = Modifier
-                                        .clickable { onSimulateIncomingRequest() }
-                                        .testTag("simulate_incoming_request_button")
+                                        .clickable { showQrScannerDialog = true }
+                                        .testTag("open_qr_from_directory_button")
                                 ) {
                                     Text(
-                                        text = "📨 Gelen İstek Test",
+                                        text = "📷 QR Tara / Kodum",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = CyberCyan,
                                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
@@ -507,14 +507,17 @@ fun ChatListAndDiscoveryScreen(
                         // Always show instant match / connection card when user searches a @username!
                         if (cleanSearchedHandle.isNotBlank()) {
                             item {
+                                val (genPub, genFp) = remember(cleanSearchedHandle) {
+                                    CryptoEngine.generateIdentityMaterial("peer_$cleanSearchedHandle", cleanSearchedHandle)
+                                }
                                 val targetPeer = exactMatchedPeer ?: UserProfile(
                                     id = "peer_$cleanSearchedHandle",
-                                    userId = "peer_$cleanSearchedHandle",
+                                    userId = "peer_" + CryptoEngine.sha256Hex("ZEROCHAT_PEER::$cleanSearchedHandle").take(18),
                                     username = cleanSearchedHandle,
                                     displayName = "@$cleanSearchedHandle",
                                     bio = "Küresel P2P Kriptografik Düğüm",
-                                    publicKey = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE${cleanSearchedHandle.hashCode()}Key==",
-                                    safetyFingerprint = CryptoEngine.sha256Hex(cleanSearchedHandle).take(30).chunked(5).joinToString(" ")
+                                    publicKey = genPub,
+                                    safetyFingerprint = genFp
                                 )
                                 val existingRoomForTarget = allRooms.firstOrNull { room ->
                                     !room.isGroup &&
@@ -540,7 +543,7 @@ fun ChatListAndDiscoveryScreen(
                                                     text = if (exactMatchedPeer != null) {
                                                         "✅ Dizin Eşleşmesi Bulundu: @${targetPeer.username}"
                                                     } else {
-                                                        "🔍 Küresel Düğüm Sorgusu: @${targetPeer.username}"
+                                                        "🔍 Küresel Düğüm Eşleşmesi: @${targetPeer.username}"
                                                     },
                                                     style = MaterialTheme.typography.titleSmall,
                                                     fontWeight = FontWeight.Bold,
@@ -550,7 +553,7 @@ fun ChatListAndDiscoveryScreen(
                                                     text = if (exactMatchedPeer != null) {
                                                         "${targetPeer.displayName} • ${targetPeer.bio}"
                                                     } else {
-                                                        "Bu kullanıcı adına doğrudan ECDH P-256 şifreli iletişim ve takip isteği gönderebilirsiniz."
+                                                        "Bu kullanıcı adıyla doğrudan ECDH P-256 + AES-256-GCM uçtan uca şifreli sohbet başlatabilirsiniz."
                                                     },
                                                     style = MaterialTheme.typography.bodySmall,
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -558,36 +561,47 @@ fun ChatListAndDiscoveryScreen(
                                             }
                                         }
                                         Spacer(modifier = Modifier.height(10.dp))
-                                        Button(
-                                            onClick = {
-                                                if (existingRoomForTarget != null && !existingRoomForTarget.isRejectedRequest) {
-                                                    onOpenRoom(existingRoomForTarget)
-                                                } else {
-                                                    peerForRequestDialog = targetPeer
-                                                }
-                                            },
-                                            colors = ButtonDefaults.buttonColors(
-                                                containerColor = NeonCyberGreen,
-                                                contentColor = Color(0xFF002110)
-                                            ),
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .testTag("direct_match_connect_button")
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                                         ) {
-                                            Icon(
-                                                imageVector = Icons.Default.PersonAdd,
-                                                contentDescription = null,
-                                                modifier = Modifier.size(18.dp)
-                                            )
-                                            Spacer(modifier = Modifier.width(8.dp))
-                                            Text(
-                                                text = if (existingRoomForTarget != null && !existingRoomForTarget.isRejectedRequest) {
-                                                    "💬 @${targetPeer.username} Sohbetini / İsteğini Aç"
-                                                } else {
-                                                    "🤝 @${targetPeer.username} İle Eşleş & İletişim İsteği Gönder"
+                                            Button(
+                                                onClick = {
+                                                    if (existingRoomForTarget != null && !existingRoomForTarget.isRejectedRequest) {
+                                                        onOpenRoom(existingRoomForTarget)
+                                                    } else {
+                                                        onSelectPeerForChat(targetPeer, "")
+                                                    }
                                                 },
-                                                fontWeight = FontWeight.Bold
-                                            )
+                                                colors = ButtonDefaults.buttonColors(
+                                                    containerColor = NeonCyberGreen,
+                                                    contentColor = Color(0xFF002110)
+                                                ),
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .testTag("direct_match_connect_button")
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.PersonAdd,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text(
+                                                    text = if (existingRoomForTarget != null && !existingRoomForTarget.isRejectedRequest) {
+                                                        "💬 @${targetPeer.username} Sohbetini Aç"
+                                                    } else {
+                                                        "💬 @${targetPeer.username} İle Şifreli Sohbet Başlat"
+                                                    },
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                            OutlinedButton(
+                                                onClick = { peerForRequestDialog = targetPeer },
+                                                border = BorderStroke(1.dp, CyberCyan)
+                                            ) {
+                                                Text("Not İle", color = CyberCyan)
+                                            }
                                         }
                                     }
                                 }
@@ -622,7 +636,7 @@ fun ChatListAndDiscoveryScreen(
                                                 if (existingRoom != null && !existingRoom.isRejectedRequest) {
                                                     onOpenRoom(existingRoom)
                                                 } else {
-                                                    peerForRequestDialog = peer
+                                                    onSelectPeerForChat(peer, "")
                                                 }
                                             }
                                         )
@@ -1534,7 +1548,7 @@ private fun EncryptedRoomCard(
                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
                     ) {
                         Text(
-                            text = if (isIncomingReq) "İsteği Onayla" else "⚡ Onayı Simüle Et",
+                            text = if (isIncomingReq) "İsteği Onayla" else "Şifreli Kanalı Aç",
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold
                         )

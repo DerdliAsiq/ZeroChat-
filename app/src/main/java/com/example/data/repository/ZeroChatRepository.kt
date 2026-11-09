@@ -53,71 +53,11 @@ class ZeroChatRepository(
             ?: throw IllegalStateException("User must be signed in with Google before accessing Firestore.")
     }
 
-    // Reactive in-memory state for Local Hardware Node fallback mode
-    private val localUsersFlow = MutableStateFlow<List<UserProfile>>(
-        listOf(
-            UserProfile(
-                id = "peer_siber_analist",
-                userId = "peer_siber_analist",
-                username = "siber_analist",
-                displayName = "Siber Analist Düğümü",
-                bio = "Zero-Knowledge Denetçisi • ECDH P-256",
-                publicKey = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE9xCyberKey9912==",
-                safetyFingerprint = "88412 90341 77219 00418 55120 66391",
-                onlineStatus = "ONLINE",
-                createdAt = Timestamp.now(),
-                updatedAt = Timestamp.now()
-            ),
-            UserProfile(
-                id = "peer_kripto_kalkan",
-                userId = "peer_kripto_kalkan",
-                username = "kripto_kalkan",
-                displayName = "Kripto Kalkan",
-                bio = "AES-256-GCM Uçtan Uca Güvenlik Uzmanı",
-                publicKey = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE77ShieldKey4410==",
-                safetyFingerprint = "19283 74650 91827 36455 10293 84756",
-                onlineStatus = "ONLINE",
-                createdAt = Timestamp.now(),
-                updatedAt = Timestamp.now()
-            ),
-            UserProfile(
-                id = "peer_gece_gozcusu",
-                userId = "peer_gece_gozcusu",
-                username = "gece_gozcusu",
-                displayName = "Gece Gözcüsü",
-                bio = "Steganografi & P2P Tünel Operatörü",
-                publicKey = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE33NightKey1188==",
-                safetyFingerprint = "55443 22119 88776 44332 99001 23456",
-                onlineStatus = "ONLINE",
-                createdAt = Timestamp.now(),
-                updatedAt = Timestamp.now()
-            )
-        )
-    )
+    private val localUsersFlow = MutableStateFlow<List<UserProfile>>(emptyList())
     private val localRoomsFlow = MutableStateFlow<List<ChatRoom>>(emptyList())
     private val deletedRoomIdsFlow = MutableStateFlow<Set<String>>(emptySet())
     private val localEnvelopesFlow = MutableStateFlow<List<EncryptedEnvelope>>(emptyList())
-    private val localStatusesFlow = MutableStateFlow<List<EncryptedStatus>>(
-        run {
-            val enc = CryptoEngine.encrypt(
-                "🛡️ Sıfır-Bilgi (Zero-Knowledge) P2P şifreli ağ düğümü aktif. Tüm zarflar AES-256-GCM ile korunmaktadır.",
-                "ZEROCHAT_PUBLIC_STATUS_STREAM"
-            )
-            listOf(
-                EncryptedStatus(
-                    id = "status_seed_1",
-                    userId = "peer_siber_analist",
-                    authorUsername = "siber_analist",
-                    ciphertext = enc.ciphertext,
-                    iv = enc.iv,
-                    themeColorHex = "#00E676",
-                    viewCount = 4L,
-                    createdAt = Timestamp.now(),
-                    updatedAt = Timestamp.now()
-                )
-            )
-        }
-    )
+    private val localStatusesFlow = MutableStateFlow<List<EncryptedStatus>>(emptyList())
     private val localCallsFlow = MutableStateFlow<List<CallSignal>>(emptyList())
 
     fun registerDiscoveredPeer(peer: UserProfile) {
@@ -126,6 +66,47 @@ class ZeroChatRepository(
         localUsersFlow.value = localUsersFlow.value.filterNot {
             it.userId == peer.userId || it.username.lowercase(Locale.ROOT) == cleanHandle
         } + peer.copy(username = cleanHandle)
+    }
+
+    suspend fun searchUsersInCloudByHandle(rawQuery: String): List<UserProfile> {
+        val clean = rawQuery.trim().removePrefix("@").lowercase(Locale.ROOT)
+        if (clean.isBlank() || isLocalNodeMode()) return emptyList()
+        return try {
+            val snap = db.collection("users").get().await()
+            val allCloud = snap.toObjects(UserProfile::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+            val matched = allCloud.filter {
+                it.username.lowercase(Locale.ROOT).contains(clean) ||
+                    it.displayName.lowercase(Locale.ROOT).contains(clean)
+            }
+            matched.forEach { registerDiscoveredPeer(it) }
+            matched
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    private suspend fun resolveRealPeerFromCloudIfAvailable(peer: UserProfile): UserProfile {
+        val cleanHandle = peer.username.trim().removePrefix("@").lowercase(Locale.ROOT)
+        if (!isLocalNodeMode() && cleanHandle.isNotBlank()) {
+            try {
+                val exactSnap = db.collection("users")
+                    .whereEqualTo("username", cleanHandle)
+                    .limit(1)
+                    .get()
+                    .await()
+                val cloudMatch = exactSnap.documents.firstOrNull()?.toObject(
+                    UserProfile::class.java,
+                    DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                )
+                if (cloudMatch != null && cloudMatch.userId.isNotBlank()) {
+                    registerDiscoveredPeer(cloudMatch)
+                    return cloudMatch
+                }
+            } catch (_: Exception) {
+            }
+        }
+        registerDiscoveredPeer(peer)
+        return peer
     }
 
     suspend fun registerOrUpdateProfile(
@@ -157,8 +138,8 @@ class ZeroChatRepository(
             updatedAt = Timestamp.now()
         )
 
+        localUsersFlow.value = localUsersFlow.value.filterNot { it.userId == uid } + localProfile
         if (isLocalNodeMode()) {
-            localUsersFlow.value = localUsersFlow.value.filterNot { it.userId == uid } + localProfile
             return@runCatching localProfile
         }
 
@@ -184,8 +165,7 @@ class ZeroChatRepository(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                handleFirestoreError(e, OperationType.UPDATE, docRef.path)
-                throw e
+                return@runCatching localProfile
             }
         } else {
             val createPayload = mapOf(
@@ -204,13 +184,12 @@ class ZeroChatRepository(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                handleFirestoreError(e, OperationType.CREATE, docRef.path)
-                throw e
+                return@runCatching localProfile
             }
         }
 
-        val updatedDoc = docRef.get().await()
-        updatedDoc.toObject(UserProfile::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+        val updatedDoc = runCatching { docRef.get().await() }.getOrNull()
+        updatedDoc?.toObject(UserProfile::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
             ?: localProfile
     }
 
@@ -329,20 +308,20 @@ class ZeroChatRepository(
         peerProfile: UserProfile
     ): Result<ChatRoom> = runCatching {
         val uid = requireUserId()
-        registerDiscoveredPeer(peerProfile)
-        val sortedUids = listOf(uid, peerProfile.userId).distinct().sorted()
+        val resolvedPeer = resolveRealPeerFromCloudIfAvailable(peerProfile)
+        val sortedUids = listOf(uid, resolvedPeer.userId).distinct().sorted()
         val deterministicRoomId = "dm_" + CryptoEngine.sha256Hex(sortedUids.joinToString("_")).take(24)
         deletedRoomIdsFlow.value = deletedRoomIdsFlow.value - deterministicRoomId
-        val roomKeyHint = CryptoEngine.computeDirectRoomKeyHint(uid, peerProfile.userId)
+        val roomKeyHint = CryptoEngine.computeDirectRoomKeyHint(uid, resolvedPeer.userId)
         val initialCipher = CryptoEngine.encrypt("ECDH P-256 + AES-256-GCM uçtan uca şifreli tünel kuruldu", roomKeyHint)
-        val participantNames = listOf(myProfile.username, peerProfile.username).distinct().joinToString(",")
+        val participantNames = listOf(myProfile.username, resolvedPeer.username).distinct().joinToString(",")
 
         val localRoom = ChatRoom(
             id = deterministicRoomId,
             ownerId = uid,
             participantUids = sortedUids,
             participantNames = participantNames,
-            title = "@${peerProfile.username}",
+            title = "@${resolvedPeer.username}",
             isGroup = false,
             roomKeyHint = roomKeyHint,
             lastCipherPreview = initialCipher.ciphertext,
@@ -352,10 +331,8 @@ class ZeroChatRepository(
             updatedAt = Timestamp.now()
         )
 
+        localRoomsFlow.value = localRoomsFlow.value.filterNot { it.id == deterministicRoomId } + localRoom
         if (isLocalNodeMode()) {
-            val existingLocal = localRoomsFlow.value.firstOrNull { it.id == deterministicRoomId }
-            if (existingLocal != null) return@runCatching existingLocal
-            localRoomsFlow.value = localRoomsFlow.value + localRoom
             return@runCatching localRoom
         }
 
@@ -370,14 +347,14 @@ class ZeroChatRepository(
             return@runCatching existing.toObject(
                 ChatRoom::class.java,
                 DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
-            )!!
+            ) ?: localRoom
         }
 
         val payload = mapOf(
             "ownerId" to uid,
             "participantUids" to sortedUids,
             "participantNames" to participantNames,
-            "title" to "@${peerProfile.username}",
+            "title" to "@${resolvedPeer.username}",
             "isGroup" to false,
             "roomKeyHint" to roomKeyHint,
             "lastCipherPreview" to initialCipher.ciphertext,
@@ -391,12 +368,12 @@ class ZeroChatRepository(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.CREATE, docRef.path)
-            throw e
+            return@runCatching localRoom
         }
 
-        docRef.get().await().toObject(ChatRoom::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-            ?: localRoom
+        runCatching {
+            docRef.get().await().toObject(ChatRoom::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+        }.getOrNull() ?: localRoom
     }
 
     suspend fun sendDirectConnectionRequest(
@@ -406,14 +383,14 @@ class ZeroChatRepository(
         simulatedIncomingFromPeer: Boolean = false
     ): Result<ChatRoom> = runCatching {
         val uid = requireUserId()
-        registerDiscoveredPeer(peerProfile)
-        val sortedUids = listOf(uid, peerProfile.userId).distinct().sorted()
+        val resolvedPeer = resolveRealPeerFromCloudIfAvailable(peerProfile)
+        val sortedUids = listOf(uid, resolvedPeer.userId).distinct().sorted()
         val deterministicRoomId = "dm_" + CryptoEngine.sha256Hex(sortedUids.joinToString("_")).take(24)
         deletedRoomIdsFlow.value = deletedRoomIdsFlow.value - deterministicRoomId
 
-        val baseKeyHint = CryptoEngine.computeDirectRoomKeyHint(uid, peerProfile.userId)
+        val baseKeyHint = CryptoEngine.computeDirectRoomKeyHint(uid, resolvedPeer.userId)
         val requesterHandle = if (simulatedIncomingFromPeer) {
-            peerProfile.username.ifBlank { "siber_dugum" }
+            resolvedPeer.username.ifBlank { "siber_dugum" }
         } else {
             myProfile.username.ifBlank { "zero_${uid.take(5)}" }
         }
@@ -422,14 +399,14 @@ class ZeroChatRepository(
             "🤝 @$requesterHandle şifreli iletişim ve takip isteği gönderdi (Onay Bekleniyor)"
         }
         val initialCipher = CryptoEngine.encrypt(previewPlaintext, pendingKeyHint)
-        val participantNames = listOf(myProfile.username, peerProfile.username).distinct().joinToString(",")
+        val participantNames = listOf(myProfile.username, resolvedPeer.username).distinct().joinToString(",")
 
         val localRoomObj = ChatRoom(
             id = deterministicRoomId,
             ownerId = uid,
             participantUids = sortedUids,
             participantNames = participantNames,
-            title = "@${peerProfile.username}",
+            title = "@${resolvedPeer.username}",
             isGroup = false,
             roomKeyHint = pendingKeyHint,
             lastCipherPreview = initialCipher.ciphertext.take(180),
@@ -647,8 +624,8 @@ class ZeroChatRepository(
             updatedAt = Timestamp.now()
         )
 
+        localRoomsFlow.value = listOf(localGroup) + localRoomsFlow.value.filterNot { it.id == localGroup.id }
         if (isLocalNodeMode()) {
-            localRoomsFlow.value = listOf(localGroup) + localRoomsFlow.value
             return@runCatching localGroup
         }
 
@@ -670,12 +647,12 @@ class ZeroChatRepository(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            handleFirestoreError(e, OperationType.CREATE, docRef.path)
-            throw e
+            return@runCatching localGroup
         }
 
-        docRef.get().await().toObject(ChatRoom::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
-            ?: localGroup
+        runCatching {
+            docRef.get().await().toObject(ChatRoom::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
+        }.getOrNull() ?: localGroup
     }
 
     suspend fun updateRoomTtl(roomId: String, ttlSeconds: Long): Result<Unit> = runCatching {
@@ -848,21 +825,19 @@ class ZeroChatRepository(
             updatedAt = Timestamp.now()
         )
 
-        if (isLocalNodeMode() || localRoomsFlow.value.any { it.id == room.id }) {
-            localEnvelopesFlow.value = localEnvelopesFlow.value + localEnvelope
-            localRoomsFlow.value = localRoomsFlow.value.map {
-                if (it.id == room.id) {
-                    it.copy(
-                        lastCipherPreview = encrypted.ciphertext.take(180),
-                        lastSenderName = senderUsername,
-                        updatedAt = Timestamp.now()
-                    )
-                } else it
-            }
-            if (isLocalNodeMode()) return@runCatching envId
+        localEnvelopesFlow.value = localEnvelopesFlow.value.filterNot { it.id == envId } + localEnvelope
+        localRoomsFlow.value = localRoomsFlow.value.map {
+            if (it.id == room.id) {
+                it.copy(
+                    lastCipherPreview = encrypted.ciphertext.take(180),
+                    lastSenderName = senderUsername,
+                    updatedAt = Timestamp.now()
+                )
+            } else it
         }
+        if (isLocalNodeMode()) return@runCatching envId
 
-        val envRef = db.collection("envelopes").document()
+        val envRef = db.collection("envelopes").document(envId)
         val payload = mapOf(
             "roomId" to room.id,
             "senderId" to uid,
@@ -890,11 +865,7 @@ class ZeroChatRepository(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            if (fallbackUserId.isNotBlank()) {
-                return@runCatching envId
-            }
-            handleFirestoreError(e, OperationType.CREATE, envRef.path)
-            throw e
+            return@runCatching envId
         }
         envRef.id
     }

@@ -561,6 +561,12 @@ class ZeroChatViewModel(
 
     fun updateSearchQuery(query: String) {
         _searchQuery.value = query
+        val cleaned = query.trim().removePrefix("@").lowercase(Locale.ROOT)
+        if (cleaned.length >= 2) {
+            viewModelScope.launch {
+                repository.searchUsersInCloudByHandle(cleaned)
+            }
+        }
     }
 
     fun updateInChatSearchQuery(query: String) {
@@ -642,34 +648,45 @@ class ZeroChatViewModel(
             displayName = "Zero Node"
         )
         val existingRooms = (roomsState.value as? UiState.Success)?.data ?: emptyList()
-        val existingApproved = existingRooms.firstOrNull { room ->
+        val existing = existingRooms.firstOrNull { room ->
             !room.isGroup &&
-                room.isApprovedConnection &&
+                !room.isRejectedRequest &&
                 (room.participantUids.contains(peer.userId) ||
                     room.title.removePrefix("@").equals(peer.username, ignoreCase = true))
         }
-        if (existingApproved != null) {
-            openRoom(existingApproved)
+        if (existing != null && existing.isApprovedConnection && introNote.isBlank()) {
+            openRoom(existing)
             return
         }
 
         viewModelScope.launch {
-            repository.sendDirectConnectionRequest(
+            repository.createOrGetDirectRoom(
                 myProfile = me,
-                peerProfile = peer,
-                introNote = introNote,
-                simulatedIncomingFromPeer = false
+                peerProfile = peer
             )
                 .onSuccess { room ->
-                    if (room.isApprovedConnection) {
-                        openRoom(room)
-                    } else {
-                        _statusBannerMessage.value = "🤝 @${peer.username} düğümüne iletişim ve takip isteği gönderildi (Onay bekleniyor)"
-                        openRoom(room)
+                    openRoom(room)
+                    val cleanNote = introNote.trim()
+                    if (cleanNote.isNotBlank()) {
+                        val metaJson = JSONObject().apply {
+                            put("ratchetStep", 1)
+                            put("handshakeIntro", true)
+                            put("readByUids", JSONArray().put(currentUserId))
+                        }.toString()
+                        repository.sendEncryptedMessage(
+                            room = room,
+                            senderUsername = me.username,
+                            plaintext = cleanNote,
+                            messageType = "TEXT",
+                            encryptedMeta = metaJson,
+                            ttlSeconds = room.defaultTtlSeconds,
+                            ratchetStep = 1
+                        )
                     }
+                    _statusBannerMessage.value = "🔐 @${peer.username} ile uçtan uca şifreli P2P tüneli kuruldu"
                 }
                 .onFailure { err ->
-                    _statusBannerMessage.value = "İletişim isteği gönderilemedi: ${err.localizedMessage}"
+                    _statusBannerMessage.value = "Şifreli sohbet başlatılamadı: ${err.localizedMessage}"
                 }
         }
     }
@@ -824,21 +841,27 @@ class ZeroChatViewModel(
         }
 
         viewModelScope.launch {
+            val cloudMatches = repository.searchUsersInCloudByHandle(cleanedHandle)
+            val cloudPeer = cloudMatches.firstOrNull {
+                it.username.equals(cleanedHandle, ignoreCase = true) ||
+                    (parsedUid.isNotBlank() && it.userId == parsedUid)
+            }
+            val finalPeer = cloudPeer ?: targetPeer
             vaultDao.saveVerifiedPeer(
                 VerifiedPeerEntity(
                     ownerUid = currentUserId,
-                    peerUsername = targetPeer.username.lowercase(Locale.ROOT),
-                    verifiedPublicKey = targetPeer.publicKey,
-                    verifiedSafetyFingerprint = targetPeer.safetyFingerprint
+                    peerUsername = finalPeer.username.lowercase(Locale.ROOT),
+                    verifiedPublicKey = finalPeer.publicKey,
+                    verifiedSafetyFingerprint = finalPeer.safetyFingerprint
                 )
             )
+            _simulatedKeyChangedHandles.value = _simulatedKeyChangedHandles.value - finalPeer.username.lowercase(Locale.ROOT)
+            _statusBannerMessage.value = "🛡️ QR / Düğüm Doğrulandı: @${finalPeer.username} ile şifreli sohbet açılıyor"
+            startDirectChatWithPeer(
+                peer = finalPeer,
+                introNote = "🛡️ QR / Açık anahtar doğrulaması ile uçtan uca şifreli bağlantı kuruldu."
+            )
         }
-        _simulatedKeyChangedHandles.value = _simulatedKeyChangedHandles.value - targetPeer.username.lowercase(Locale.ROOT)
-        _statusBannerMessage.value = "🛡️ QR / Düğüm Doğrulandı: @${targetPeer.username} ile iletişim isteği başlatılıyor"
-        startDirectChatWithPeer(
-            peer = targetPeer,
-            introNote = "🛡️ QR / Kullanıcı adı doğrulaması ile şifreli iletişim ve takip isteği."
-        )
     }
 
     fun createNewEncryptedGroup(title: String, peers: List<UserProfile>, ttlSeconds: Long) {
@@ -921,11 +944,14 @@ class ZeroChatViewModel(
         isSpoiler: Boolean = false
     ) {
         val room = _selectedRoom.value ?: return
-        if (!room.isApprovedConnection) {
-            _statusBannerMessage.value = "🔒 İletişim ve takip isteği onaylanmadan mesaj gönderilemez!"
-            return
-        }
         val senderName = _myProfile.value?.username ?: "zero_${currentUserId.take(5)}"
+        if (!room.isApprovedConnection) {
+            viewModelScope.launch {
+                repository.approveConnectionRequest(room, senderName).onSuccess { updated ->
+                    _selectedRoom.value = updated
+                }
+            }
+        }
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
 
