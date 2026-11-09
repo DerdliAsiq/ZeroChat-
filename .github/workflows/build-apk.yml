@@ -49,22 +49,56 @@ jobs:
           import os, re
           from pathlib import Path
 
+          # 1) ZeroChatModels.kt icine participantHandles ozelligi ekle (eger yoksa)
+          models_kt = Path("app/src/main/java/com/example/data/model/ZeroChatModels.kt")
+          if models_kt.exists():
+              mtxt = models_kt.read_text(encoding="utf-8")
+              if "val participantHandles" not in mtxt:
+                  mtxt = mtxt.replace(
+                      "val defaultTtlSeconds: Long = 0L,",
+                      "val defaultTtlSeconds: Long = 0L,\n    val participantHandles: List<String> = emptyList(),"
+                  )
+                  models_kt.write_text(mtxt, encoding="utf-8")
+                  print("Added participantHandles to ChatRoom")
+
+          # 2) LocalVaultDatabase.kt icine decryptedPreview extension ekle (eger yoksa)
+          vault_kt = Path("app/src/main/java/com/example/data/local/LocalVaultDatabase.kt")
+          if vault_kt.exists():
+              vtxt = vault_kt.read_text(encoding="utf-8")
+              if "decryptedPreview" not in vtxt:
+                  vtxt = vtxt + "\nval ScheduledEnvelopeEntity.decryptedPreview: String get() = plaintext\n"
+                  vault_kt.write_text(vtxt, encoding="utf-8")
+                  print("Added decryptedPreview extension to ScheduledEnvelopeEntity")
+
+          # 3) Tum Kotlin dosyalarinda sched.decryptedPreview referansini duzelt
+          for kt_path in Path("app/src/main/java").rglob("*.kt"):
+              txt = kt_path.read_text(encoding="utf-8")
+              new_txt = txt.replace("sched.decryptedPreview", "sched.plaintext")
+              if new_txt != txt:
+                  kt_path.write_text(new_txt, encoding="utf-8")
+                  print(f"Patched decryptedPreview in {kt_path}")
+
+          # 4) MainActivity.kt icinde onSelectPeerForChat imzasi eski kalmissa duzelt
           main_kt = Path("app/src/main/java/com/example/MainActivity.kt")
-          if main_kt.exists():
-              txt = main_kt.read_text(encoding="utf-8")
-              txt = re.sub(
-                  r'activeRoom\.participantHandles\.firstOrNull\s*\{[^}]*\}\s*\?:\s*',
-                  '',
-                  txt
-              )
-              main_kt.write_text(txt, encoding="utf-8")
+          list_kt = Path("app/src/main/java/com/example/ui/screens/ChatListAndDiscoveryScreen.kt")
+          if main_kt.exists() and list_kt.exists():
+              ltxt = list_kt.read_text(encoding="utf-8")
+              mtxt = main_kt.read_text(encoding="utf-8")
+              if "(UserProfile, String) -> Unit" in ltxt:
+                  mtxt2 = mtxt.replace(
+                      "onSelectPeerForChat = viewModel::startDirectChatWithPeer",
+                      "onSelectPeerForChat = { peer, note -> viewModel.startDirectChatWithPeer(peer, note) }"
+                  )
+                  mtxt2 = re.sub(
+                      r"onSelectPeerForChat\s*=\s*\{\s*peer\s*->\s*viewModel\.startDirectChatWithPeer\(peer\)\s*\}",
+                      "onSelectPeerForChat = { peer, note -> viewModel.startDirectChatWithPeer(peer, note) }",
+                      mtxt2
+                  )
+                  if mtxt2 != mtxt:
+                      main_kt.write_text(mtxt2, encoding="utf-8")
+                      print("Patched onSelectPeerForChat in MainActivity.kt")
 
-          chat_kt = Path("app/src/main/java/com/example/ui/screens/ChatConversationScreen.kt")
-          if chat_kt.exists():
-              txt = chat_kt.read_text(encoding="utf-8")
-              txt = txt.replace("sched.decryptedPreview", "sched.plaintext")
-              chat_kt.write_text(txt, encoding="utf-8")
-
+          # 5) Eger GitHub runner'da android-36.1 SDK paketi yoksa compileSdk = 36 yap
           sdk_root = os.environ.get("ANDROID_HOME", "/usr/local/lib/android/sdk")
           if not Path(sdk_root, "platforms", "android-36.1").exists():
               gradle_kt = Path("app/build.gradle.kts")
@@ -83,7 +117,15 @@ jobs:
           gradle-version: '9.3.1'
 
       - name: Debug APK Derle
-        run: gradle assembleDebug --no-daemon --console=plain
+        run: |
+          set -o pipefail
+          gradle assembleDebug --no-daemon --console=plain 2>&1 | tee build.log || {
+            echo "=========================================="
+            echo "KOTLIN DERLEME HATASI DETAYI:"
+            grep -E "^e: |FAILURE:|What went wrong" -A 4 build.log || tail -n 60 build.log
+            echo "=========================================="
+            exit 1
+          }
 
       - name: ZeroChat APK Dosyasini Yukle
         uses: actions/upload-artifact@v4

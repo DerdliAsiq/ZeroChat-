@@ -43,6 +43,9 @@ data class ChatRoom(
     val isApprovedConnection: Boolean
         get() = isGroup || (!isPendingRequest && !isRejectedRequest)
 
+    val participantHandles: List<String>
+        get() = participantNames.split(",").map { it.trim().removePrefix("@") }.filter { it.isNotEmpty() }
+
     val requesterUsername: String
         get() = if (roomKeyHint.startsWith("REQ_FROM::") || roomKeyHint.startsWith("REQ_REJECTED::")) {
             roomKeyHint.split("::").getOrNull(1).orEmpty()

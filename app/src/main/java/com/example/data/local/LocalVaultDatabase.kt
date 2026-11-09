@@ -47,6 +47,9 @@ data class ScheduledEnvelopeEntity(
     val createdAtMillis: Long = System.currentTimeMillis()
 )
 
+val ScheduledEnvelopeEntity.decryptedPreview: String
+    get() = plaintext
+
 @Entity(tableName = "vault_security_config")
 data class VaultSecurityConfigEntity(
     @PrimaryKey val ownerUid: String,
