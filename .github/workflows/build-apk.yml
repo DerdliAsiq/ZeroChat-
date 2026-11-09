@@ -13,26 +13,40 @@ jobs:
       - name: Repo Kodunu Çek (Checkout)
         uses: actions/checkout@v4
 
-      - name: JDK 17 Kurulumu
+      - name: JDK 21 Kurulumu
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17'
+          java-version: '21'
 
-      - name: Android SDK Kurulumu
-        uses: android-actions/setup-android@v3
-
-      - name: Debug Keystore Hazırla
+      - name: Android SDK Lisanslarını Onayla
         run: |
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+
+      - name: Ortam ve Debug Keystore Hazırla
+        run: |
+          if [ ! -f ".env" ]; then
+            if [ -f ".env.example" ]; then
+              cp .env.example .env
+            else
+              touch .env
+            fi
+          fi
           if [ -f "debug.keystore.base64" ]; then
             base64 -d debug.keystore.base64 > debug.keystore
           elif [ ! -f "debug.keystore" ]; then
             keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      - name: Gradle İle Debug APK Derle
-        uses: gradle/actions/setup-gradle@v3
-      - run: gradle assembleDebug --stacktrace
+      - name: Gradle 9.3.1 Kurulumu
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.3.1'
+
+      - name: Debug APK Derle (assembleDebug)
+        run: gradle assembleDebug --stacktrace
 
       - name: ZeroChat APK Dosyasını Yükle (Artifact)
         uses: actions/upload-artifact@v4
