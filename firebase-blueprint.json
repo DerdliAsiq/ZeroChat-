@@ -1,0 +1,334 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Cryptographic identity and public username directory entry for a ZeroChat user.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user."
+        },
+        "username": {
+          "type": "string",
+          "description": "Unique lowercase handle without @ symbol."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Public display alias."
+        },
+        "bio": {
+          "type": "string",
+          "description": "User status line or cryptographic note."
+        },
+        "publicKey": {
+          "type": "string",
+          "description": "Base64-encoded public key for E2EE session derivation."
+        },
+        "safetyFingerprint": {
+          "type": "string",
+          "description": "60-digit or hex SHA-256 identity fingerprint for QR/Safety Number verification."
+        },
+        "onlineStatus": {
+          "type": "string",
+          "description": "Current node presence state."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when identity was registered via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when identity was last updated via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "userId",
+        "username",
+        "displayName",
+        "bio",
+        "publicKey",
+        "safetyFingerprint",
+        "onlineStatus",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "ChatRoom": {
+      "title": "ChatRoom",
+      "description": "End-to-end encrypted 1-on-1 or group chat session metadata.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "UID of the user who initiated the encrypted room."
+        },
+        "participantUids": {
+          "type": "array",
+          "description": "Bounded list of participant UIDs (max 10)."
+        },
+        "participantNames": {
+          "type": "string",
+          "description": "Comma-separated participant @usernames for display."
+        },
+        "title": {
+          "type": "string",
+          "description": "Room or group title."
+        },
+        "isGroup": {
+          "type": "boolean",
+          "description": "True if group chat, false if 1-on-1 peer session."
+        },
+        "roomKeyHint": {
+          "type": "string",
+          "description": "Deterministic key derivation salt/seed identifier for E2EE room cipher."
+        },
+        "lastCipherPreview": {
+          "type": "string",
+          "description": "Encrypted ciphertext preview of the last message (never plaintext)."
+        },
+        "lastSenderName": {
+          "type": "string",
+          "description": "Handle of the last message sender."
+        },
+        "defaultTtlSeconds": {
+          "type": "integer",
+          "description": "Default self-destruct timer in seconds (0 = off)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last activity server timestamp."
+        }
+      },
+      "required": [
+        "ownerId",
+        "participantUids",
+        "participantNames",
+        "title",
+        "isGroup",
+        "roomKeyHint",
+        "lastCipherPreview",
+        "lastSenderName",
+        "defaultTtlSeconds",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "EncryptedEnvelope": {
+      "title": "EncryptedEnvelope",
+      "description": "Zero-knowledge AES-256-GCM encrypted message payload transmitted between peers.",
+      "type": "object",
+      "properties": {
+        "roomId": {
+          "type": "string",
+          "description": "Target ChatRoom ID."
+        },
+        "senderId": {
+          "type": "string",
+          "description": "Sender UID."
+        },
+        "senderUsername": {
+          "type": "string",
+          "description": "Sender @username."
+        },
+        "participantUids": {
+          "type": "array",
+          "description": "Denormalized participant UIDs for zero-lookup rule authorization."
+        },
+        "ciphertext": {
+          "type": "string",
+          "description": "Base64 AES-256-GCM encrypted message body."
+        },
+        "iv": {
+          "type": "string",
+          "description": "Base64 12-byte GCM initialization vector."
+        },
+        "signatureHash": {
+          "type": "string",
+          "description": "SHA-256 integrity authentication tag."
+        },
+        "messageType": {
+          "type": "string",
+          "enum": ["TEXT", "IMAGE", "VOICE", "POLL", "LOCATION", "FILE"],
+          "description": "Type of encrypted payload."
+        },
+        "encryptedMeta": {
+          "type": "string",
+          "description": "Encrypted or structured metadata for polls, voice waveform, location, or media."
+        },
+        "reactionsSummary": {
+          "type": "string",
+          "description": "Serialized emoji reactions map (e.g. user:emoji)."
+        },
+        "ttlSeconds": {
+          "type": "integer",
+          "description": "Self-destruct timer in seconds (0 = permanent)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last update server timestamp."
+        }
+      },
+      "required": [
+        "roomId",
+        "senderId",
+        "senderUsername",
+        "participantUids",
+        "ciphertext",
+        "iv",
+        "signatureHash",
+        "messageType",
+        "encryptedMeta",
+        "reactionsSummary",
+        "ttlSeconds",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "EncryptedStatus": {
+      "title": "EncryptedStatus",
+      "description": "24-hour ephemeral encrypted status story.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Author UID."
+        },
+        "authorUsername": {
+          "type": "string",
+          "description": "Author @username."
+        },
+        "ciphertext": {
+          "type": "string",
+          "description": "AES-256-GCM encrypted status caption/text."
+        },
+        "iv": {
+          "type": "string",
+          "description": "Base64 GCM IV."
+        },
+        "themeColorHex": {
+          "type": "string",
+          "description": "Hex color code for status card background."
+        },
+        "viewCount": {
+          "type": "integer",
+          "description": "Number of verified peer views."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation server timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Update server timestamp."
+        }
+      },
+      "required": [
+        "userId",
+        "authorUsername",
+        "ciphertext",
+        "iv",
+        "themeColorHex",
+        "viewCount",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CallSignal": {
+      "title": "CallSignal",
+      "description": "Encrypted P2P voice and video call signaling session.",
+      "type": "object",
+      "properties": {
+        "callerId": {
+          "type": "string",
+          "description": "Caller UID."
+        },
+        "callerUsername": {
+          "type": "string",
+          "description": "Caller @username."
+        },
+        "calleeUsername": {
+          "type": "string",
+          "description": "Target @username."
+        },
+        "participantUids": {
+          "type": "array",
+          "description": "Caller and callee UIDs."
+        },
+        "callType": {
+          "type": "string",
+          "enum": ["AUDIO", "VIDEO"],
+          "description": "Audio or Video P2P call."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["RINGING", "CONNECTED", "ENDED"],
+          "description": "Signaling state."
+        },
+        "safetyEmojis": {
+          "type": "string",
+          "description": "4-emoji key verification sequence for the call."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Call start server timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last signal state update server timestamp."
+        }
+      },
+      "required": [
+        "callerId",
+        "callerUsername",
+        "calleeUsername",
+        "participantUids",
+        "callType",
+        "status",
+        "safetyEmojis",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Public key & username directory for E2EE peer discovery."
+    },
+    "/rooms/{roomId}": {
+      "schema": { "$ref": "#/entities/ChatRoom" },
+      "description": "Encrypted chat rooms (1-on-1 and Group)."
+    },
+    "/envelopes/{envelopeId}": {
+      "schema": { "$ref": "#/entities/EncryptedEnvelope" },
+      "description": "Encrypted message envelopes scoped to room participants."
+    },
+    "/statuses/{statusId}": {
+      "schema": { "$ref": "#/entities/EncryptedStatus" },
+      "description": "24-hour encrypted status updates."
+    },
+    "/calls/{callId}": {
+      "schema": { "$ref": "#/entities/CallSignal" },
+      "description": "Encrypted P2P voice/video call signaling records."
+    }
+  }
+}

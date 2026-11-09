@@ -1,0 +1,25 @@
+<resources>
+    <string name="app_name">ZeroChat</string>
+    <string name="tagline_zero_knowledge">Uçtan Uca Şifreli • Sıfır Bilgi • P2P</string>
+    <string name="sign_in_with_google">Google ile Güvenli Düğüm Başlat</string>
+    <string name="auth_subtitle">Mesajlarınız merkezi sunucularda asla düz metin olarak saklanmaz. Cihazınızda AES-256-GCM anahtar çifti üretilir.</string>
+    <string name="tab_chats">Sohbetler</string>
+    <string name="tab_statuses">Durumlar</string>
+    <string name="tab_calls">Aramalar</string>
+    <string name="tab_vault">Güvenlik Kasası</string>
+    <string name="search_username_hint">Kullanıcı adı ile ara (@kullanici_adi)...</string>
+    <string name="new_group_button">Şifreli Grup</string>
+    <string name="new_chat_button">Kullanıcı Bul</string>
+    <string name="panic_mode_active_banner">Acil Durum (Panik) Görünümü Aktif — Gizli Oturumlar Maskelendi</string>
+    <string name="empty_chats_title">Henüz Aktif Şifreli Oturum Yok</string>
+    <string name="empty_chats_subtitle">Yukarıdan @kullanici_adi araması yaparak veya yeni bir grup kurarak uçtan uca şifreli sohbet başlatın.</string>
+    <string name="encryption_verified_badge">AES-256-GCM Doğrulandı</string>
+    <string name="message_input_hint">Şifreli mesaj yazın...</string>
+    <string name="send_message_desc">Şifrele ve Gönder</string>
+    <string name="inspect_cipher_title">Kriptografik Zarf ve Güvenlik Denetçisi</string>
+    <string name="burn_timer_label">Kendini İmha Süresi</string>
+    <string name="vault_pin_title">Gizli Kasa ve Panik Kodu</string>
+    <string name="status_add_button">24 Saatlik Şifreli Durum Paylaş</string>
+    <string name="call_start_audio">Sesli P2P Arama</string>
+    <string name="call_start_video">Görüntülü P2P Arama</string>
+</resources>
