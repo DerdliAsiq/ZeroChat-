@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Repo Kodunu Çek (Checkout)
+      - name: Repo Kodunu Cek
         uses: actions/checkout@v4
 
       - name: JDK 21 Kurulumu
@@ -19,13 +19,13 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Android SDK Lisanslarını Onayla
+      - name: Android SDK Lisanslarini Onayla
         run: |
           export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           export ANDROID_SDK_ROOT="$ANDROID_HOME"
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
-      - name: Ortam ve Debug Keystore Hazırla
+      - name: Ortam ve Debug Keystore Hazirla
         run: |
           if [ ! -f ".env" ]; then
             if [ -f ".env.example" ]; then
@@ -45,10 +45,10 @@ jobs:
         with:
           gradle-version: '9.3.1'
 
-      - name: Debug APK Derle (assembleDebug)
+      - name: Debug APK Derle
         run: gradle assembleDebug --stacktrace
 
-      - name: ZeroChat APK Dosyasını Yükle (Artifact)
+      - name: ZeroChat APK Dosyasini Yukle
         uses: actions/upload-artifact@v4
         with:
           name: ZeroChat-Debug-APK
