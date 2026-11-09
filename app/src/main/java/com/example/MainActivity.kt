@@ -3,9 +3,9 @@ package com.example
 import android.app.Activity
 import android.os.Bundle
 import android.view.WindowManager
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.fragment.app.FragmentActivity
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -58,6 +58,7 @@ import com.example.data.repository.ZeroChatRepository
 import com.example.ui.UiState
 import com.example.ui.ZeroChatViewModel
 import com.example.ui.auth.AuthScreen
+import com.example.ui.auth.getSavedLocalNodeSession
 import com.example.ui.auth.signOutZeroChat
 import com.example.ui.screens.ActiveP2PCallOverlay
 import com.example.ui.screens.CallsTabScreen
@@ -70,6 +71,7 @@ import com.example.ui.theme.CarbonSurface
 import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.theme.NeonCyberGreen
 import com.example.ui.theme.ObsidianBlack
+import com.example.util.authenticateWithRealBiometrics
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
@@ -87,7 +89,7 @@ internal fun FirebaseAuth.authStateFlow(): Flow<FirebaseUser?> = callbackFlow {
     awaitClose { removeAuthStateListener(listener) }
 }
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -101,18 +103,31 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun ZeroChatRootApp(auth: FirebaseAuth = Firebase.auth) {
+    val context = LocalContext.current
     val currentUser by auth.authStateFlow().collectAsStateWithLifecycle(initialValue = auth.currentUser)
+    var localNodeSession by remember { mutableStateOf(getSavedLocalNodeSession(context)) }
     val user = currentUser
 
-    if (user == null) {
+    val activeUid = user?.uid ?: localNodeSession?.first
+    val activeHint = user?.email ?: localNodeSession?.second
+
+    if (activeUid == null) {
         AuthScreen(
-            onAuthSuccess = {}
+            onAuthSuccess = {
+                localNodeSession = getSavedLocalNodeSession(context)
+            },
+            onNodeSessionSuccess = { uid, handle ->
+                localNodeSession = uid to handle
+            }
         )
     } else {
-        key(user.uid) {
+        key(activeUid) {
             ZeroChatAuthenticatedShell(
-                currentUserId = user.uid,
-                userEmailHint = user.email
+                currentUserId = activeUid,
+                userEmailHint = activeHint,
+                onSignedOut = {
+                    localNodeSession = null
+                }
             )
         }
     }
@@ -121,7 +136,8 @@ fun ZeroChatRootApp(auth: FirebaseAuth = Firebase.auth) {
 @Composable
 fun ZeroChatAuthenticatedShell(
     currentUserId: String,
-    userEmailHint: String?
+    userEmailHint: String?,
+    onSignedOut: () -> Unit = {}
 ) {
     val viewModel: ZeroChatViewModel = viewModel(
         key = currentUserId,
@@ -134,7 +150,7 @@ fun ZeroChatAuthenticatedShell(
                 val db = FirebaseFirestore.getInstance(databaseId)
                 val vaultDb = LocalVaultDatabase.getInstance(app)
                 ZeroChatViewModel(
-                    repository = ZeroChatRepository(db),
+                    repository = ZeroChatRepository(db, currentUserId),
                     vaultDao = vaultDb.vaultDao(),
                     currentUserId = currentUserId,
                     initialEmailHint = userEmailHint
@@ -428,11 +444,18 @@ fun ZeroChatAuthenticatedShell(
                             onRejectConnectionRequest = viewModel::rejectOrCancelConnectionRequest,
                             onSimulateIncomingRequest = { viewModel.simulateIncomingConnectionRequest() },
                             onOpenRoom = viewModel::openRoom,
+                            onDeleteRoom = viewModel::deleteChatRoomFromRecent,
                             onToggleRoomVaultLock = viewModel::toggleRoomVaultLock,
                             onTogglePinRoom = viewModel::togglePinRoom,
                             onCreateGroup = viewModel::createNewEncryptedGroup,
                             onVerifyPin = viewModel::verifyPinInput,
-                            onBiometricUnlock = viewModel::unlockVaultWithBiometrics,
+                            onBiometricUnlock = {
+                                authenticateWithRealBiometrics(
+                                    context = context,
+                                    onSuccess = { viewModel.unlockVaultWithBiometrics() },
+                                    onError = { errMsg -> viewModel.postBannerMessage(errMsg) }
+                                )
+                            },
                             onExitPanicOrLockVault = viewModel::lockVaultAndExitPanicMode
                         )
                     }
@@ -474,7 +497,13 @@ fun ZeroChatAuthenticatedShell(
                             onToggleOfflineQueueMode = viewModel::toggleOfflineQueueMode,
                             onToggleBiometricUnlock = viewModel::toggleBiometricUnlock,
                             onToggleAutoLockOnBackground = viewModel::toggleAutoLockOnBackground,
-                            onBiometricUnlockNow = viewModel::unlockVaultWithBiometrics,
+                            onBiometricUnlockNow = {
+                                authenticateWithRealBiometrics(
+                                    context = context,
+                                    onSuccess = { viewModel.unlockVaultWithBiometrics() },
+                                    onError = { errMsg -> viewModel.postBannerMessage(errMsg) }
+                                )
+                            },
                             onFlushOfflineQueue = viewModel::flushOfflineOutboxQueue,
                             onExportEncryptedBackup = viewModel::exportEncryptedBackup,
                             onImportEncryptedBackup = viewModel::importEncryptedBackup,
@@ -484,7 +513,9 @@ fun ZeroChatAuthenticatedShell(
                             onSignOut = {
                                 signOutZeroChat(
                                     credentialManager = credentialManager,
-                                    scope = scope
+                                    scope = scope,
+                                    context = context,
+                                    onSignOutComplete = onSignedOut
                                 )
                             }
                         )

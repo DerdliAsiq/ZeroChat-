@@ -1,16 +1,8 @@
 package com.example.ui.components
 
-import android.Manifest
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
+import android.net.Uri
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -41,6 +33,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -50,15 +44,14 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -73,75 +66,47 @@ import com.example.ui.theme.CyberCyan
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.NeonCyberGreen
 import com.example.ui.theme.ObsidianBlack
+import com.example.util.RealCameraQrScannerView
+import com.example.util.generateRealQrCodeBitmap
 
 @Composable
 fun CyberQrMatrix(
     seedData: String,
-    modifier: Modifier = Modifier.size(168.dp),
+    modifier: Modifier = Modifier.size(176.dp),
     activeColor: Color = NeonCyberGreen
 ) {
-    val hashHex = remember(seedData) {
-        CryptoEngine.sha256Hex(seedData) + CryptoEngine.sha256Hex("ALT::$seedData")
+    val qrPayload = remember(seedData) {
+        if (seedData.startsWith("zerochat://", ignoreCase = true) ||
+            seedData.startsWith("ZEROCHAT://", ignoreCase = true)
+        ) {
+            seedData
+        } else {
+            "ZEROCHAT://VERIFY/${Uri.encode(seedData)}"
+        }
+    }
+    val qrBitmap = remember(qrPayload) {
+        generateRealQrCodeBitmap(content = qrPayload, sizePx = 512)
     }
 
     Surface(
         shape = RoundedCornerShape(16.dp),
         color = ObsidianBlack,
-        border = BorderStroke(1.5.dp, activeColor.copy(alpha = 0.7f)),
+        border = BorderStroke(1.5.dp, activeColor.copy(alpha = 0.8f)),
         modifier = modifier
     ) {
-        Canvas(
+        Box(
+            contentAlignment = Alignment.Center,
             modifier = Modifier
-                .padding(14.dp)
+                .fillMaxSize()
+                .padding(10.dp)
         ) {
-            val grid = 15
-            val cellW = size.width / grid
-            val cellH = size.height / grid
-
-            fun isFinderPattern(r: Int, c: Int): Boolean {
-                val topLeft = r in 0..4 && c in 0..4
-                val topRight = r in 0..4 && c in (grid - 5) until grid
-                val bottomLeft = r in (grid - 5) until grid && c in 0..4
-                return topLeft || topRight || bottomLeft
-            }
-
-            fun drawFinder(startR: Int, startC: Int) {
-                for (dr in 0..4) {
-                    for (dc in 0..4) {
-                        val isBorder = dr == 0 || dr == 4 || dc == 0 || dc == 4
-                        val isCenter = dr == 2 && dc == 2
-                        if (isBorder || isCenter) {
-                            drawRoundRect(
-                                color = if (isCenter) CyberCyan else activeColor,
-                                topLeft = Offset((startC + dc) * cellW, (startR + dr) * cellH),
-                                size = Size(cellW * 0.9f, cellH * 0.9f),
-                                cornerRadius = CornerRadius(2f, 2f)
-                            )
-                        }
-                    }
-                }
-            }
-
-            drawFinder(0, 0)
-            drawFinder(0, grid - 5)
-            drawFinder(grid - 5, 0)
-
-            var bitIndex = 0
-            for (r in 0 until grid) {
-                for (c in 0 until grid) {
-                    if (isFinderPattern(r, c)) continue
-                    val charVal = hashHex[bitIndex % hashHex.length].digitToIntOrNull(16) ?: 0
-                    val bitOn = ((charVal + r + c) % 2) == 0
-                    bitIndex++
-                    if (bitOn) {
-                        drawRoundRect(
-                            color = activeColor,
-                            topLeft = Offset(c * cellW, r * cellH),
-                            size = Size(cellW * 0.85f, cellH * 0.85f),
-                            cornerRadius = CornerRadius(2f, 2f)
-                        )
-                    }
-                }
+            if (qrBitmap != null) {
+                Image(
+                    bitmap = qrBitmap,
+                    contentDescription = "Gerçek Taranabilir Kriptografik QR Kod",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize()
+                )
             }
         }
     }
@@ -162,6 +127,9 @@ fun RoomSafetyAndCipherInspectorDialog(
     }
     val emojis = remember(room.roomKeyHint) {
         CryptoEngine.deriveSafetyEmojis(room.roomKeyHint)
+    }
+    val peerHandle = remember(room.title) {
+        room.title.removePrefix("@").trim()
     }
 
     Dialog(onDismissRequest = onDismiss) {
@@ -211,7 +179,9 @@ fun RoomSafetyAndCipherInspectorDialog(
 
                 Spacer(modifier = Modifier.height(10.dp))
 
-                CyberQrMatrix(seedData = "${room.id}::${room.roomKeyHint}")
+                CyberQrMatrix(
+                    seedData = "zerochat://peer?u=${Uri.encode(peerHandle)}&fp=${Uri.encode(safetyNumber)}"
+                )
 
                 Spacer(modifier = Modifier.height(10.dp))
 
@@ -406,29 +376,21 @@ fun RoomSafetyAndCipherInspectorDialog(
 
 @Composable
 fun QrScannerAndVerifierDialog(
+    myProfile: UserProfile? = null,
     availablePeers: List<UserProfile>,
     onDismiss: () -> Unit,
     onScanVerified: (String) -> Unit
 ) {
     var manualKeyOrHandle by remember { mutableStateOf("") }
-    var cameraAuthorized by remember { mutableStateOf(false) }
+    var selectedTab by remember { mutableIntStateOf(0) } // 0 = Canlı Kamera QR Tarayıcı, 1 = Benim QR Kodum
 
-    val cameraPermissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        cameraAuthorized = granted
+    val myQrPayload = remember(myProfile) {
+        val handle = myProfile?.username ?: "zerochat_node"
+        val uid = myProfile?.userId ?: "uid_$handle"
+        val fp = myProfile?.safetyFingerprint ?: CryptoEngine.sha256Hex(handle).take(30)
+        val pk = myProfile?.publicKey ?: "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE"
+        "zerochat://peer?u=${Uri.encode(handle)}&uid=${Uri.encode(uid)}&fp=${Uri.encode(fp)}&pk=${Uri.encode(pk)}"
     }
-
-    val infiniteTransition = rememberInfiniteTransition(label = "qr_laser")
-    val laserProgress by infiniteTransition.animateFloat(
-        initialValue = 0.08f,
-        targetValue = 0.92f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1800, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "laser_y"
-    )
 
     Dialog(onDismissRequest = onDismiss) {
         Card(
@@ -439,7 +401,7 @@ fun QrScannerAndVerifierDialog(
         ) {
             Column(
                 modifier = Modifier
-                    .padding(20.dp)
+                    .padding(18.dp)
                     .verticalScroll(rememberScrollState()),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
@@ -457,7 +419,7 @@ fun QrScannerAndVerifierDialog(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Siber QR Tarayıcı & Doğrulama",
+                            text = "Canlı Kamera QR & Kimlik",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
@@ -467,70 +429,87 @@ fun QrScannerAndVerifierDialog(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(8.dp))
 
-                // Interactive Cyber Laser Viewfinder
-                Surface(
-                    shape = RoundedCornerShape(18.dp),
-                    color = ObsidianBlack,
-                    border = BorderStroke(1.5.dp, CyberCyan.copy(alpha = 0.7f)),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(175.dp)
-                        .clickable {
-                            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-                        }
+                // Mode Switcher: Live Camera Scanner vs My QR Code
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Canvas(modifier = Modifier.fillMaxSize()) {
-                            val strokeW = 4.dp.toPx()
-                            val cornerLen = 26.dp.toPx()
-                            val pad = 18.dp.toPx()
-
-                            // Top-Left Bracket
-                            drawLine(NeonCyberGreen, Offset(pad, pad), Offset(pad + cornerLen, pad), strokeW)
-                            drawLine(NeonCyberGreen, Offset(pad, pad), Offset(pad, pad + cornerLen), strokeW)
-                            // Top-Right Bracket
-                            drawLine(NeonCyberGreen, Offset(size.width - pad, pad), Offset(size.width - pad - cornerLen, pad), strokeW)
-                            drawLine(NeonCyberGreen, Offset(size.width - pad, pad), Offset(size.width - pad, pad + cornerLen), strokeW)
-                            // Bottom-Left Bracket
-                            drawLine(NeonCyberGreen, Offset(pad, size.height - pad), Offset(pad + cornerLen, size.height - pad), strokeW)
-                            drawLine(NeonCyberGreen, Offset(pad, size.height - pad), Offset(pad, size.height - pad - cornerLen), strokeW)
-                            // Bottom-Right Bracket
-                            drawLine(NeonCyberGreen, Offset(size.width - pad, size.height - pad), Offset(size.width - pad - cornerLen, size.height - pad), strokeW)
-                            drawLine(NeonCyberGreen, Offset(size.width - pad, size.height - pad), Offset(size.width - pad, size.height - pad - cornerLen), strokeW)
-
-                            // Animated Laser Line
-                            val yPos = size.height * laserProgress
-                            drawLine(
-                                color = CyberCyan,
-                                start = Offset(pad * 1.4f, yPos),
-                                end = Offset(size.width - pad * 1.4f, yPos),
-                                strokeWidth = 2.5.dp.toPx()
-                            )
-                        }
-
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    FilterChip(
+                        selected = selectedTab == 0,
+                        onClick = { selectedTab = 0 },
+                        leadingIcon = {
                             Icon(
                                 imageVector = Icons.Default.CameraAlt,
                                 contentDescription = null,
-                                tint = if (cameraAuthorized) NeonCyberGreen else CyberCyan,
-                                modifier = Modifier.size(30.dp)
+                                modifier = Modifier.size(16.dp)
                             )
-                            Spacer(modifier = Modifier.height(6.dp))
+                        },
+                        label = { Text("Kamerayla Tara", style = MaterialTheme.typography.labelMedium) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                            selectedLabelColor = NeonCyberGreen
+                        ),
+                        modifier = Modifier.weight(1f)
+                    )
+                    FilterChip(
+                        selected = selectedTab == 1,
+                        onClick = { selectedTab = 1 },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Default.QrCode2,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        },
+                        label = { Text("QR Kodum", style = MaterialTheme.typography.labelMedium) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                            selectedLabelColor = CyberCyan
+                        ),
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                if (selectedTab == 0) {
+                    // REAL CAMERAX + ZXING QR SCANNER VIEW
+                    RealCameraQrScannerView(
+                        onQrCodeDetected = { rawQrText ->
+                            onScanVerified(rawQrText)
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(250.dp)
+                    )
+                } else {
+                    // MY REAL SCANNABLE QR CODE
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = ObsidianBlack,
+                        border = BorderStroke(1.5.dp, CyberCyan),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            CyberQrMatrix(
+                                seedData = myQrPayload,
+                                modifier = Modifier.size(200.dp)
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
                             Text(
-                                text = if (cameraAuthorized) {
-                                    "Kamera Tarayıcı Aktif • QR Kodunu Hizalayın"
-                                } else {
-                                    "Kamera Sensörünü Etkinleştirmek İçin Dokunun"
-                                },
-                                style = MaterialTheme.typography.labelSmall,
-                                color = NeonCyberGreen,
-                                textAlign = TextAlign.Center
+                                text = "@${myProfile?.username ?: "zerochat_node"}",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = NeonCyberGreen
                             )
                             Text(
-                                text = "ECDH P-256 Açık Anahtar ve 60 Haneli Parmak İzi Okuyucu",
-                                style = MaterialTheme.typography.labelSmall,
+                                text = "Karşı cihazın kamerasıyla bu QR kodu okuttuğunuzda ECDH P-256 anahtarınız doğrulanır ve anında eşleşir.",
+                                style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 textAlign = TextAlign.Center
                             )
@@ -541,7 +520,7 @@ fun QrScannerAndVerifierDialog(
                 if (availablePeers.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
-                        text = "Yakındaki Düğümlerin QR Kimliğini Doğrula:",
+                        text = "Dizindeki Düğümleri Hızlı Doğrula & Eşleştir:",
                         style = MaterialTheme.typography.labelSmall,
                         color = CyberCyan,
                         modifier = Modifier.fillMaxWidth()
@@ -572,7 +551,7 @@ fun QrScannerAndVerifierDialog(
                                     )
                                     Spacer(modifier = Modifier.width(4.dp))
                                     Text(
-                                        text = "@${peer.username} QR Tara",
+                                        text = "@${peer.username} Bağlan",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = NeonCyberGreen
                                     )
@@ -587,7 +566,7 @@ fun QrScannerAndVerifierDialog(
                 OutlinedTextField(
                     value = manualKeyOrHandle,
                     onValueChange = { manualKeyOrHandle = it },
-                    label = { Text("@kullanici_adi veya ZC-ECDH-P256 Anahtarı Yapıştır") },
+                    label = { Text("@kullanici_adi veya ZC-ECDH-P256 Anahtarı Gir") },
                     singleLine = true,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -618,7 +597,7 @@ fun QrScannerAndVerifierDialog(
                         ),
                         modifier = Modifier.testTag("qr_verify_confirm_button")
                     ) {
-                        Text("QR Doğrula ve Bağlan", fontWeight = FontWeight.Bold)
+                        Text("Doğrula ve Eşleş", fontWeight = FontWeight.Bold)
                     }
                 }
             }

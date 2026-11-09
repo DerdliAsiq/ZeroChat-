@@ -455,16 +455,28 @@ class ZeroChatViewModel(
     }
 
     private fun bootstrapIdentityIfNeeded(emailHint: String?) {
+        val defaultHandle = emailHint?.substringBefore("@")
+            ?.lowercase(Locale.ROOT)
+            ?.replace("[^a-z0-9_\\-]".toRegex(), "")
+            ?.takeIf { it.length >= 3 }
+            ?: "zero_${currentUserId.take(6).lowercase(Locale.ROOT)}"
+
+        val hw = CryptoEngine.getOrCreateHardwareIdentity(currentUserId, defaultHandle)
+        _hardwareKeyStatus.value = hw
+        if (_myProfile.value == null) {
+            _myProfile.value = UserProfile(
+                id = currentUserId,
+                userId = currentUserId,
+                username = defaultHandle,
+                displayName = defaultHandle.uppercase(Locale.ROOT),
+                bio = "ECDH P-256 + AES-256-GCM Doğrulanmış Düğüm",
+                publicKey = hw.publicKeyBase64,
+                safetyFingerprint = hw.safetyFingerprint,
+                onlineStatus = "ONLINE"
+            )
+        }
+
         viewModelScope.launch {
-            val defaultHandle = emailHint?.substringBefore("@")
-                ?.lowercase(Locale.ROOT)
-                ?.replace("[^a-z0-9_\\-]".toRegex(), "")
-                ?.takeIf { it.length >= 3 }
-                ?: "zero_${currentUserId.take(6).lowercase(Locale.ROOT)}"
-
-            val hw = CryptoEngine.getOrCreateHardwareIdentity(currentUserId, defaultHandle)
-            _hardwareKeyStatus.value = hw
-
             val result = repository.registerOrUpdateProfile(
                 rawUsername = _myProfile.value?.username ?: defaultHandle,
                 displayName = _myProfile.value?.displayName ?: defaultHandle.uppercase(Locale.ROOT),
@@ -577,6 +589,10 @@ class ZeroChatViewModel(
 
     fun clearBannerMessage() {
         _statusBannerMessage.value = null
+    }
+
+    fun postBannerMessage(message: String) {
+        _statusBannerMessage.value = message
     }
 
     fun updateMyProfile(username: String, displayName: String, bio: String) {
@@ -720,33 +736,109 @@ class ZeroChatViewModel(
         }
     }
 
+    fun deleteChatRoomFromRecent(room: ChatRoom) {
+        viewModelScope.launch {
+            if (_selectedRoom.value?.id == room.id) {
+                closeRoom()
+            }
+            vaultDao.deleteCachedMessagesForRoom(currentUserId, room.id)
+            vaultDao.unpinRoom(currentUserId, room.id)
+            vaultDao.unlockRoom(room.id)
+            repository.deleteChatRoomCompletely(room.id, currentUserId)
+                .onSuccess {
+                    _statusBannerMessage.value = "🗑️ ${room.title} sohbeti ve şifreli zarfları listeden kalıcı olarak silindi"
+                }
+                .onFailure { err ->
+                    _statusBannerMessage.value = "Sohbet silinemedi: ${err.localizedMessage}"
+                }
+        }
+    }
+
     fun handleScannedPeerHandleOrKey(scannedInput: String) {
-        val cleaned = scannedInput.trim().removePrefix("@").lowercase(Locale.ROOT)
-        if (cleaned.isBlank()) return
+        val raw = scannedInput.trim()
+        if (raw.isBlank()) return
+
+        // Parse structured QR payload: zerochat://peer?u=handle&uid=id&fp=fingerprint&pk=pubkey
+        // or ZEROCHAT://VERIFY/@handle::fp::pk or plain @username
+        var parsedHandle = ""
+        var parsedUid = ""
+        var parsedFp = ""
+        var parsedPk = ""
+
+        if (raw.startsWith("zerochat://", ignoreCase = true) && raw.contains("?")) {
+            val queryPart = raw.substringAfter("?")
+            queryPart.split("&").forEach { kv ->
+                val parts = kv.split("=", limit = 2)
+                if (parts.size == 2) {
+                    val k = parts[0].lowercase(Locale.ROOT)
+                    val v = java.net.URLDecoder.decode(parts[1], "UTF-8")
+                    when (k) {
+                        "u", "user", "username" -> parsedHandle = v
+                        "uid", "id" -> parsedUid = v
+                        "fp", "fingerprint" -> parsedFp = v
+                        "pk", "key", "pubkey" -> parsedPk = v
+                    }
+                }
+            }
+        } else if (raw.contains("::")) {
+            val segs = raw.removePrefix("ZEROCHAT://VERIFY/").split("::")
+            parsedHandle = segs.getOrNull(0).orEmpty()
+            parsedFp = segs.getOrNull(1).orEmpty()
+            parsedPk = segs.getOrNull(2).orEmpty()
+        } else {
+            parsedHandle = raw
+        }
+
+        val cleanedHandle = parsedHandle.trim()
+            .removePrefix("@")
+            .lowercase(Locale.ROOT)
+            .replace("[^a-z0-9_\\-]".toRegex(), "")
+            .take(28)
+
+        if (cleanedHandle.isBlank()) return
+
         val peers = (directoryUsersState.value as? UiState.Success)?.data ?: emptyList()
         val matched = peers.firstOrNull {
-            it.username.lowercase(Locale.ROOT) == cleaned ||
-                it.publicKey.lowercase(Locale.ROOT).contains(cleaned) ||
-                it.safetyFingerprint.contains(cleaned)
+            it.username.lowercase(Locale.ROOT) == cleanedHandle ||
+                (parsedUid.isNotBlank() && it.userId == parsedUid) ||
+                (parsedFp.isNotBlank() && it.safetyFingerprint == parsedFp)
         }
-        if (matched != null) {
-            viewModelScope.launch {
-                vaultDao.saveVerifiedPeer(
-                    VerifiedPeerEntity(
-                        ownerUid = currentUserId,
-                        peerUsername = matched.username.lowercase(Locale.ROOT),
-                        verifiedPublicKey = matched.publicKey,
-                        verifiedSafetyFingerprint = matched.safetyFingerprint
-                    )
-                )
+
+        val targetPeer = matched ?: run {
+            val peerUid = parsedUid.ifBlank {
+                "peer_" + CryptoEngine.sha256Hex("ZEROCHAT_PEER::$cleanedHandle").take(18)
             }
-            _simulatedKeyChangedHandles.value = _simulatedKeyChangedHandles.value - matched.username.lowercase(Locale.ROOT)
-            _statusBannerMessage.value = "🛡️ QR Doğrulandı ve Mühürlendi: @${matched.username} ile iletişim isteği kontrol ediliyor"
-            startDirectChatWithPeer(matched)
-        } else {
-            _searchQuery.value = cleaned
-            _statusBannerMessage.value = "QR Verisi Okundu: '@$cleaned' dizinde aranıyor"
+            val (genPubKey, genFp) = CryptoEngine.generateIdentityMaterial(peerUid, cleanedHandle)
+            UserProfile(
+                id = peerUid,
+                userId = peerUid,
+                username = cleanedHandle,
+                displayName = "@$cleanedHandle Siber Düğümü",
+                bio = "QR / Kullanıcı Adı ile Eşleşen Şifreli Düğüm",
+                publicKey = parsedPk.ifBlank { genPubKey },
+                safetyFingerprint = parsedFp.ifBlank { genFp },
+                onlineStatus = "ONLINE"
+            ).also { discovered ->
+                repository.registerDiscoveredPeer(discovered)
+            }
         }
+
+        viewModelScope.launch {
+            vaultDao.saveVerifiedPeer(
+                VerifiedPeerEntity(
+                    ownerUid = currentUserId,
+                    peerUsername = targetPeer.username.lowercase(Locale.ROOT),
+                    verifiedPublicKey = targetPeer.publicKey,
+                    verifiedSafetyFingerprint = targetPeer.safetyFingerprint
+                )
+            )
+        }
+        _simulatedKeyChangedHandles.value = _simulatedKeyChangedHandles.value - targetPeer.username.lowercase(Locale.ROOT)
+        _statusBannerMessage.value = "🛡️ QR / Düğüm Doğrulandı: @${targetPeer.username} ile iletişim isteği başlatılıyor"
+        startDirectChatWithPeer(
+            peer = targetPeer,
+            introNote = "🛡️ QR / Kullanıcı adı doğrulaması ile şifreli iletişim ve takip isteği."
+        )
     }
 
     fun createNewEncryptedGroup(title: String, peers: List<UserProfile>, ttlSeconds: Long) {

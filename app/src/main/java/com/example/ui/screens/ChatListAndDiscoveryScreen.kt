@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudSync
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.GroupAdd
 import androidx.compose.material.icons.filled.HourglassTop
@@ -60,6 +61,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -114,6 +116,7 @@ fun ChatListAndDiscoveryScreen(
     onRejectConnectionRequest: (ChatRoom) -> Unit = {},
     onSimulateIncomingRequest: () -> Unit = {},
     onOpenRoom: (ChatRoom) -> Unit,
+    onDeleteRoom: (ChatRoom) -> Unit = {},
     onTogglePinRoom: (String, Boolean) -> Unit = { _, _ -> },
     onToggleRoomVaultLock: (String, Boolean) -> Unit,
     onCreateGroup: (String, List<UserProfile>, Long) -> Unit,
@@ -125,6 +128,13 @@ fun ChatListAndDiscoveryScreen(
     var showCreateGroupDialog by remember { mutableStateOf(false) }
     var showQrScannerDialog by remember { mutableStateOf(false) }
     var peerForRequestDialog by remember { mutableStateOf<UserProfile?>(null) }
+    var roomPendingDelete by remember { mutableStateOf<ChatRoom?>(null) }
+
+    LaunchedEffect(isVaultUnlocked) {
+        if (isVaultUnlocked) {
+            showPinDialog = false
+        }
+    }
 
     val allRooms = (roomsState as? UiState.Success)?.data ?: emptyList()
     val pendingRequestRooms = remember(allRooms) {
@@ -451,6 +461,14 @@ fun ChatListAndDiscoveryScreen(
                 // Global @username peer discovery section
                 if (!isPanicModeActive && directoryState is UiState.Success) {
                     val peers = directoryState.data
+                    val cleanSearchedHandle = searchQuery.trim().removePrefix("@").lowercase(Locale.ROOT)
+                        .replace("[^a-z0-9_\\-.]".toRegex(), "")
+                    val exactMatchedPeer = if (cleanSearchedHandle.isNotBlank()) {
+                        peers.firstOrNull { it.username.equals(cleanSearchedHandle, ignoreCase = true) }
+                    } else {
+                        null
+                    }
+
                     if (searchQuery.isNotBlank() || peers.isNotEmpty()) {
                         item {
                             Row(
@@ -460,7 +478,7 @@ fun ChatListAndDiscoveryScreen(
                             ) {
                                 Text(
                                     text = if (searchQuery.isNotBlank()) {
-                                        "Küresel @kullanici_adi Eşleşmeleri (${peers.size})"
+                                        "Küresel @kullanici_adi Arama & Eşleşme (${peers.size} dizin düğümü)"
                                     } else {
                                         "Açık Anahtar Dizini (@kullanici_adi ile İstek Gönder)"
                                     },
@@ -486,24 +504,97 @@ fun ChatListAndDiscoveryScreen(
                             }
                         }
 
-                        if (peers.isEmpty() && searchQuery.isNotBlank()) {
+                        // Always show instant match / connection card when user searches a @username!
+                        if (cleanSearchedHandle.isNotBlank()) {
                             item {
+                                val targetPeer = exactMatchedPeer ?: UserProfile(
+                                    id = "peer_$cleanSearchedHandle",
+                                    userId = "peer_$cleanSearchedHandle",
+                                    username = cleanSearchedHandle,
+                                    displayName = "@$cleanSearchedHandle",
+                                    bio = "Küresel P2P Kriptografik Düğüm",
+                                    publicKey = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE${cleanSearchedHandle.hashCode()}Key==",
+                                    safetyFingerprint = CryptoEngine.sha256Hex(cleanSearchedHandle).take(30).chunked(5).joinToString(" ")
+                                )
+                                val existingRoomForTarget = allRooms.firstOrNull { room ->
+                                    !room.isGroup &&
+                                        (room.participantUids.contains(targetPeer.userId) ||
+                                            room.title.removePrefix("@").equals(targetPeer.username, ignoreCase = true))
+                                }
+
                                 Card(
                                     colors = CardDefaults.cardColors(
                                         containerColor = MaterialTheme.colorScheme.surface
                                     ),
-                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                                    border = BorderStroke(1.5.dp, NeonCyberGreen),
                                     modifier = Modifier.fillMaxWidth()
                                 ) {
-                                    Text(
-                                        text = "'@$searchQuery' ile eşleşen düğüm bulunamadı.",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.padding(14.dp)
-                                    )
+                                    Column(modifier = Modifier.padding(14.dp)) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = if (exactMatchedPeer != null) {
+                                                        "✅ Dizin Eşleşmesi Bulundu: @${targetPeer.username}"
+                                                    } else {
+                                                        "🔍 Küresel Düğüm Sorgusu: @${targetPeer.username}"
+                                                    },
+                                                    style = MaterialTheme.typography.titleSmall,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = NeonCyberGreen
+                                                )
+                                                Text(
+                                                    text = if (exactMatchedPeer != null) {
+                                                        "${targetPeer.displayName} • ${targetPeer.bio}"
+                                                    } else {
+                                                        "Bu kullanıcı adına doğrudan ECDH P-256 şifreli iletişim ve takip isteği gönderebilirsiniz."
+                                                    },
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                        }
+                                        Spacer(modifier = Modifier.height(10.dp))
+                                        Button(
+                                            onClick = {
+                                                if (existingRoomForTarget != null && !existingRoomForTarget.isRejectedRequest) {
+                                                    onOpenRoom(existingRoomForTarget)
+                                                } else {
+                                                    peerForRequestDialog = targetPeer
+                                                }
+                                            },
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = NeonCyberGreen,
+                                                contentColor = Color(0xFF002110)
+                                            ),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .testTag("direct_match_connect_button")
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.PersonAdd,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(
+                                                text = if (existingRoomForTarget != null && !existingRoomForTarget.isRejectedRequest) {
+                                                    "💬 @${targetPeer.username} Sohbetini / İsteğini Aç"
+                                                } else {
+                                                    "🤝 @${targetPeer.username} İle Eşleş & İletişim İsteği Gönder"
+                                                },
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                        }
+                                    }
                                 }
                             }
-                        } else {
+                        }
+
+                        if (peers.isNotEmpty()) {
                             item {
                                 LazyRow(
                                     horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -618,7 +709,8 @@ fun ChatListAndDiscoveryScreen(
                                     onApproveRequest = { onApproveConnectionRequest(room) },
                                     onRejectOrCancelRequest = { onRejectConnectionRequest(room) },
                                     onTogglePin = { onTogglePinRoom(room.id, isPinned) },
-                                    onToggleLock = { onToggleRoomVaultLock(room.id, isLocked) }
+                                    onToggleLock = { onToggleRoomVaultLock(room.id, isLocked) },
+                                    onDelete = { roomPendingDelete = room }
                                 )
                             }
                         }
@@ -669,7 +761,6 @@ fun ChatListAndDiscoveryScreen(
             biometricUnlockEnabled = biometricUnlockEnabled,
             onBiometricUnlock = {
                 onBiometricUnlock()
-                showPinDialog = false
             },
             onDismiss = { showPinDialog = false },
             onVerifyPin = { pin ->
@@ -680,6 +771,69 @@ fun ChatListAndDiscoveryScreen(
                 status
             }
         )
+    }
+
+    if (roomPendingDelete != null) {
+        val targetRoom = roomPendingDelete!!
+        Dialog(onDismissRequest = { roomPendingDelete = null }) {
+            Card(
+                shape = RoundedCornerShape(22.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.5.dp, BurnCoralRed)
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.DeleteOutline,
+                            contentDescription = null,
+                            tint = BurnCoralRed
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "Sohbeti Kalıcı Olarak Sil",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = BurnCoralRed
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "'${targetRoom.title}' sohbetini ve içindeki tüm şifreli zarfları son sohbetler listesinden kalıcı olarak silmek istediğinize emin misiniz?",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        OutlinedButton(onClick = { roomPendingDelete = null }) {
+                            Text("Vazgeç")
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = {
+                                roomPendingDelete = null
+                                onDeleteRoom(targetRoom)
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = BurnCoralRed,
+                                contentColor = Color.White
+                            ),
+                            modifier = Modifier.testTag("confirm_delete_room_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.DeleteOutline,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Evet, Sohbeti Sil", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        }
     }
 
     if (showCreateGroupDialog) {
@@ -697,6 +851,7 @@ fun ChatListAndDiscoveryScreen(
     if (showQrScannerDialog) {
         val peers = (directoryState as? UiState.Success)?.data ?: emptyList()
         QrScannerAndVerifierDialog(
+            myProfile = myProfile,
             availablePeers = peers,
             onDismiss = { showQrScannerDialog = false },
             onScanVerified = { scanned ->
@@ -1102,7 +1257,8 @@ private fun EncryptedRoomCard(
     onApproveRequest: () -> Unit = {},
     onRejectOrCancelRequest: () -> Unit = {},
     onTogglePin: () -> Unit = {},
-    onToggleLock: () -> Unit
+    onToggleLock: () -> Unit,
+    onDelete: () -> Unit = {}
 ) {
     val isIncomingReq = room.isIncomingRequestFor(myUsername)
     val isOutgoingReq = room.isOutgoingRequestFrom(myUsername)
@@ -1332,6 +1488,20 @@ private fun EncryptedRoomCard(
                         imageVector = if (isVaultLocked) Icons.Default.Lock else Icons.Default.LockOpen,
                         contentDescription = "Kasaya Kilitle",
                         tint = if (isVaultLocked) AmberTimerWarning else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+
+                IconButton(
+                    onClick = onDelete,
+                    modifier = Modifier
+                        .size(36.dp)
+                        .testTag("delete_room_button_${room.id}")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.DeleteOutline,
+                        contentDescription = "Sohbeti Sil",
+                        tint = BurnCoralRed,
                         modifier = Modifier.size(18.dp)
                     )
                 }

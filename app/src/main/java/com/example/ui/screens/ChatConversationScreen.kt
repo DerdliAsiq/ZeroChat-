@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.AddCircleOutline
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Autorenew
 import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.ContentCopy
@@ -131,6 +132,7 @@ import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.NeonCyberGreen
 import com.example.ui.theme.ObsidianBlack
 import com.example.ui.theme.OutgoingBubbleSurface
+import com.example.util.RealCameraPhotoCaptureDialog
 import com.example.util.VoiceAudioManager
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -207,6 +209,7 @@ fun ChatConversationScreen(
     var inspectedMessage by remember { mutableStateOf<DecryptedMessageItem?>(null) }
     var activeViewOnceMessage by remember { mutableStateOf<DecryptedMessageItem?>(null) }
     var showRoomInspector by remember { mutableStateOf(false) }
+    var showCameraPhotoCapture by remember { mutableStateOf(false) }
     var selectedTtlOverride by remember(room.defaultTtlSeconds) { mutableStateOf(room.defaultTtlSeconds) }
     var isViewOnceSelected by remember { mutableStateOf(false) }
     var isSpoilerSelected by remember { mutableStateOf(false) }
@@ -1045,8 +1048,17 @@ fun ChatConversationScreen(
                         horizontalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
                         AttachmentToolButton(
+                            icon = Icons.Default.CameraAlt,
+                            label = "Kamera Çek",
+                            tint = NeonCyberGreen,
+                            onClick = {
+                                showAttachmentTools = false
+                                showCameraPhotoCapture = true
+                            }
+                        )
+                        AttachmentToolButton(
                             icon = Icons.Default.Image,
-                            label = "Fotoğraf",
+                            label = "Galeri Foto",
                             tint = NeonCyberGreen,
                             onClick = {
                                 showAttachmentTools = false
@@ -1196,6 +1208,23 @@ fun ChatConversationScreen(
                 }
             }
         }
+    }
+
+    if (showCameraPhotoCapture) {
+        RealCameraPhotoCaptureDialog(
+            onPhotoCapturedDataUri = { dataUri ->
+                showCameraPhotoCapture = false
+                onSendImageAttachment(
+                    dataUri,
+                    if (isViewOnceSelected) "🔥👁️ 1 Kez Görüntülenebilir Kamera Fotoğrafı" else "📸 Kamerayla Çekilen Şifreli Fotoğraf",
+                    selectedTtlOverride,
+                    isViewOnceSelected,
+                    ""
+                )
+                isViewOnceSelected = false
+            },
+            onDismiss = { showCameraPhotoCapture = false }
+        )
     }
 
     if (showRoomInspector) {
