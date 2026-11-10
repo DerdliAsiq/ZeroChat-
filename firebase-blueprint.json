@@ -285,6 +285,26 @@
           "type": "string",
           "description": "4-emoji key verification sequence for the call."
         },
+        "callerAudioB64": {
+          "type": "string",
+          "description": "Optional live encrypted Base64 audio chunk from caller."
+        },
+        "calleeAudioB64": {
+          "type": "string",
+          "description": "Optional live encrypted Base64 audio chunk from callee."
+        },
+        "callerVideoB64": {
+          "type": "string",
+          "description": "Optional live encrypted Base64 video frame from caller."
+        },
+        "calleeVideoB64": {
+          "type": "string",
+          "description": "Optional live encrypted Base64 video frame from callee."
+        },
+        "mediaSeq": {
+          "type": "integer",
+          "description": "Sequence counter for real-time call media packets."
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",

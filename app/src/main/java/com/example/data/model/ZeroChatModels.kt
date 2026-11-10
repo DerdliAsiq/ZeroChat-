@@ -77,6 +77,20 @@ data class ChatRoom(
         val me = myUsername?.trim()?.lowercase() ?: return true
         return requesterUsername.trim().lowercase() == me
     }
+
+    fun peerHandleFor(myUsername: String?): String {
+        if (isGroup) return title
+        val me = myUsername?.trim()?.removePrefix("@")?.lowercase().orEmpty()
+        val otherFromList = participantHandles.firstOrNull { it.lowercase() != me }
+        if (!otherFromList.isNullOrBlank()) return otherFromList
+        return title.trim().removePrefix("@")
+    }
+
+    fun displayTitleFor(myUsername: String?): String {
+        if (isGroup) return title
+        val peer = peerHandleFor(myUsername)
+        return if (peer.isNotBlank()) "@$peer" else title
+    }
 }
 
 @IgnoreExtraProperties
@@ -120,6 +134,11 @@ data class CallSignal(
     val callType: String = "AUDIO",
     val status: String = "RINGING",
     val safetyEmojis: String = "🛡️  ⚡  🔑  🔒",
+    val callerAudioB64: String = "",
+    val calleeAudioB64: String = "",
+    val callerVideoB64: String = "",
+    val calleeVideoB64: String = "",
+    val mediaSeq: Long = 0L,
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 )

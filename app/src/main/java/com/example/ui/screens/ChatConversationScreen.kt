@@ -36,9 +36,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.core.content.ContextCompat
+import android.content.pm.PackageManager
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Forward
@@ -224,6 +227,13 @@ fun ChatConversationScreen(
     var isRecordingAudio by remember { mutableStateOf(false) }
     var recordingElapsedSeconds by remember { mutableIntStateOf(0) }
     var playingMessageId by remember { mutableStateOf<String?>(null) }
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(messages.size, messages.lastOrNull()?.id, room.id) {
+        if (messages.isNotEmpty()) {
+            listState.animateScrollToItem(messages.size)
+        }
+    }
 
     LaunchedEffect(editingMessage) {
         if (editingMessage != null) {
@@ -409,7 +419,7 @@ fun ChatConversationScreen(
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = room.title,
+                            text = room.displayTitleFor(myUsername),
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold,
                             maxLines = 1,
@@ -422,7 +432,7 @@ fun ChatConversationScreen(
                                 isRoomPeerVerified -> Icons.Default.VerifiedUser
                                 else -> Icons.Default.Shield
                             },
-                            contentDescription = "Doğrulanmış Şifreleme",
+                            contentDescription = "Güvenli Bağlantı",
                             tint = when {
                                 hasRoomKeyChangedWarning -> BurnCoralRed
                                 isRoomPeerVerified -> CyberCyan
@@ -433,7 +443,7 @@ fun ChatConversationScreen(
                         if (isRoomPeerVerified && !hasRoomKeyChangedWarning) {
                             Spacer(modifier = Modifier.width(4.dp))
                             Text(
-                                text = "🛡️ Doğrulandı",
+                                text = "Doğrulandı",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = CyberCyan
                             )
@@ -441,11 +451,11 @@ fun ChatConversationScreen(
                     }
                     Text(
                         text = if (peerTypingHandle != null) {
-                            "⚡ @$peerTypingHandle şifreli paket yazıyor..."
+                            "@$peerTypingHandle yazıyor..."
                         } else if (room.isGroup) {
-                            "${room.participantUids.size} Üye • ECDH + Ratchet"
+                            "${room.participantUids.size} Üye • Uçtan Uca Şifreli"
                         } else {
-                            "ECDH P-256 + Ratchet • Anahtarı Denetle"
+                            "Çevrimiçi • Uçtan Uca Şifreli"
                         },
                         style = MaterialTheme.typography.labelSmall,
                         color = if (peerTypingHandle != null) CyberCyan else NeonCyberGreen
@@ -539,13 +549,13 @@ fun ChatConversationScreen(
                         Spacer(modifier = Modifier.width(8.dp))
                         Column {
                             Text(
-                                text = "⚠️ DİKKAT: Karşı Düğümün Kriptografik Anahtarı Değişti!",
+                                text = "⚠️ Güvenlik Anahtarı Değişti",
                                 style = MaterialTheme.typography.labelLarge,
                                 fontWeight = FontWeight.Bold,
                                 color = BurnCoralRed
                             )
                             Text(
-                                text = "Olası MITM saldırısı veya cihaz sıfırlaması. Devam etmeden önce güvenlik numarasını doğrulayın.",
+                                text = "Karşı kullanıcının güvenlik kodu yenilendi. Devam etmeden önce doğrulayın.",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onErrorContainer
                             )
@@ -566,7 +576,7 @@ fun ChatConversationScreen(
             }
         }
 
-        // Scheduled Envelopes Banner
+        // Scheduled Messages Banner
         if (scheduledEnvelopes.isNotEmpty()) {
             Surface(
                 color = MaterialTheme.colorScheme.surfaceVariant,
@@ -583,7 +593,7 @@ fun ChatConversationScreen(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "⏳ Zamanlanmış Şifreli Zarflar (${scheduledEnvelopes.size})",
+                            text = "⏳ Zamanlanmış Mesajlar (${scheduledEnvelopes.size})",
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
                             color = CyberCyan
@@ -720,7 +730,7 @@ fun ChatConversationScreen(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = "Süreli Mesaj İmha:",
+                        text = "Süreli Mesaj:",
                         style = MaterialTheme.typography.labelSmall,
                         color = AmberTimerWarning
                     )
@@ -742,15 +752,15 @@ fun ChatConversationScreen(
 
         // Encrypted Messages List
         LazyColumn(
+            state = listState,
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth(),
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             item {
                 SessionSecurityNoticeBanner(
-                    roomKeyHint = room.roomKeyHint,
                     onInspectClick = {
                         inspectedMessage = null
                         showRoomInspector = true
@@ -873,7 +883,7 @@ fun ChatConversationScreen(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "🎙️ AAC Ses Kaydediliyor (${recordingElapsedSeconds} sn)...",
+                            text = "🎙️ Ses kaydediliyor (${recordingElapsedSeconds} sn)...",
                             style = MaterialTheme.typography.labelLarge,
                             color = MaterialTheme.colorScheme.onErrorContainer
                         )
@@ -905,7 +915,7 @@ fun ChatConversationScreen(
                         ) {
                             Icon(imageVector = Icons.Default.StopCircle, contentDescription = null)
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text("Şifrele & Gönder", fontWeight = FontWeight.Bold)
+                            Text("Gönder", fontWeight = FontWeight.Bold)
                         }
                     }
                 }
@@ -1160,7 +1170,17 @@ fun ChatConversationScreen(
                             tint = NeonCyberGreen,
                             onClick = {
                                 showAttachmentTools = false
-                                micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                val hasMicPerm = ContextCompat.checkSelfPermission(
+                                    context,
+                                    Manifest.permission.RECORD_AUDIO
+                                ) == PackageManager.PERMISSION_GRANTED
+                                if (hasMicPerm) {
+                                    if (voiceAudioManager.startRecording()) {
+                                        isRecordingAudio = true
+                                    }
+                                } else {
+                                    micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                }
                             }
                         )
                         AttachmentToolButton(
@@ -1202,7 +1222,7 @@ fun ChatConversationScreen(
                     ) {
                         Icon(
                             imageVector = Icons.Default.AddCircleOutline,
-                            contentDescription = "Zengin İçerik Ekle",
+                            contentDescription = "İçerik Ekle",
                             tint = NeonCyberGreen
                         )
                     }
@@ -1227,16 +1247,16 @@ fun ChatConversationScreen(
                         placeholder = {
                             Text(
                                 text = when {
-                                    editingMessage != null -> "Yeni mesaj metnini girin..."
-                                    isViewOnceSelected -> "🔥👁️ 1 kez görüntülenip imha edilecek mesaj..."
-                                    isSpoilerSelected -> "🕵️ Gizli maskeli (spoiler) mesaj..."
-                                    selectedTtlOverride > 0L -> "🔥 ${selectedTtlOverride}s süreli şifreli mesaj..."
+                                    editingMessage != null -> "Mesajı düzenleyin..."
+                                    isViewOnceSelected -> "🔥👁️ 1 kez görüntülenecek mesaj..."
+                                    isSpoilerSelected -> "🕵️ Gizli (spoiler) mesaj..."
+                                    selectedTtlOverride > 0L -> "🔥 ${selectedTtlOverride}s süreli mesaj..."
                                     else -> stringResource(R.string.message_input_hint)
                                 },
                                 style = MaterialTheme.typography.bodyMedium
                             )
                         },
-                        shape = RoundedCornerShape(20.dp),
+                        shape = RoundedCornerShape(22.dp),
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedBorderColor = NeonCyberGreen,
                             unfocusedBorderColor = MaterialTheme.colorScheme.outline,
@@ -1253,35 +1273,58 @@ fun ChatConversationScreen(
 
                     Surface(
                         shape = CircleShape,
-                        color = NeonCyberGreen,
+                        color = if (isRecordingAudio) BurnCoralRed else NeonCyberGreen,
                         modifier = Modifier
                             .size(48.dp)
                             .clickable {
-                                if (messageText.isNotBlank()) {
-                                    onSendText(
-                                        messageText,
-                                        selectedTtlOverride,
-                                        isViewOnceSelected,
-                                        isSpoilerSelected
-                                    )
-                                    messageText = ""
-                                    isViewOnceSelected = false
-                                    isSpoilerSelected = false
-                                } else {
-                                    micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                when {
+                                    isRecordingAudio -> {
+                                        val res = voiceAudioManager.stopRecording()
+                                        isRecordingAudio = false
+                                        onSendVoiceNote(
+                                            res.durationSeconds.coerceAtLeast(1),
+                                            res.waveformString,
+                                            res.audioBase64,
+                                            selectedTtlOverride
+                                        )
+                                    }
+                                    messageText.isNotBlank() -> {
+                                        onSendText(
+                                            messageText,
+                                            selectedTtlOverride,
+                                            isViewOnceSelected,
+                                            isSpoilerSelected
+                                        )
+                                        messageText = ""
+                                        isViewOnceSelected = false
+                                        isSpoilerSelected = false
+                                    }
+                                    else -> {
+                                        val hasMicPerm = ContextCompat.checkSelfPermission(
+                                            context,
+                                            Manifest.permission.RECORD_AUDIO
+                                        ) == PackageManager.PERMISSION_GRANTED
+                                        if (hasMicPerm) {
+                                            if (voiceAudioManager.startRecording()) {
+                                                isRecordingAudio = true
+                                            }
+                                        } else {
+                                            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                        }
+                                    }
                                 }
                             }
                             .testTag("send_message_button")
                     ) {
                         Box(contentAlignment = Alignment.Center) {
                             Icon(
-                                imageVector = if (messageText.isNotBlank()) {
-                                    Icons.AutoMirrored.Filled.Send
-                                } else {
-                                    Icons.Default.Mic
+                                imageVector = when {
+                                    isRecordingAudio -> Icons.Default.StopCircle
+                                    messageText.isNotBlank() -> Icons.AutoMirrored.Filled.Send
+                                    else -> Icons.Default.Mic
                                 },
                                 contentDescription = stringResource(R.string.send_message_desc),
-                                tint = Color(0xFF002110)
+                                tint = if (isRecordingAudio) Color.White else Color(0xFF002110)
                             )
                         }
                     }
@@ -1296,7 +1339,7 @@ fun ChatConversationScreen(
                 showCameraPhotoCapture = false
                 onSendImageAttachment(
                     dataUri,
-                    if (isViewOnceSelected) "🔥👁️ 1 Kez Görüntülenebilir Kamera Fotoğrafı" else "📸 Kamerayla Çekilen Şifreli Fotoğraf",
+                    if (isViewOnceSelected) "🔥👁️ 1 Kez Görüntülenebilir Fotoğraf" else "📸 Fotoğraf",
                     selectedTtlOverride,
                     isViewOnceSelected,
                     ""
@@ -1310,6 +1353,7 @@ fun ChatConversationScreen(
     if (showRoomInspector) {
         RoomSafetyAndCipherInspectorDialog(
             room = room,
+            myUsername = myUsername,
             inspectedMessage = inspectedMessage,
             isPeerVerified = isRoomPeerVerified,
             hasKeyChangedWarning = hasRoomKeyChangedWarning,
@@ -1405,36 +1449,33 @@ fun ChatConversationScreen(
 
 @Composable
 private fun SessionSecurityNoticeBanner(
-    roomKeyHint: String,
     onInspectClick: () -> Unit
 ) {
-    Card(
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = BorderStroke(1.dp, NeonCyberGreen.copy(alpha = 0.35f)),
+    Box(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onInspectClick)
+            .padding(vertical = 4.dp),
+        contentAlignment = Alignment.Center
     ) {
-        Row(
-            modifier = Modifier.padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically
+        Surface(
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.surface,
+            border = BorderStroke(1.dp, NeonCyberGreen.copy(alpha = 0.28f)),
+            modifier = Modifier.clickable(onClick = onInspectClick)
         ) {
-            Icon(
-                imageVector = Icons.Default.Lock,
-                contentDescription = null,
-                tint = NeonCyberGreen,
-                modifier = Modifier.size(18.dp)
-            )
-            Spacer(modifier = Modifier.width(10.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Sıfır-Bilgi (Zero-Knowledge) ECDH + Forward Secrecy Oturumu",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = NeonCyberGreen
+            Row(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Lock,
+                    contentDescription = null,
+                    tint = NeonCyberGreen,
+                    modifier = Modifier.size(14.dp)
                 )
+                Spacer(modifier = Modifier.width(6.dp))
                 Text(
-                    text = "Anahtar: ${roomKeyHint.take(20)} • QR, Ratchet adımı ve şifreli paketleri denetlemek için dokunun.",
+                    text = "Mesajlar ve aramalar uçtan uca şifrelidir • Doğrulamak için dokunun",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -1725,11 +1766,7 @@ private fun EncryptedMessageBubble(
                                                 color = if (isPlayingAudio) NeonCyberGreen else CyberCyan
                                             )
                                             Text(
-                                                text = if (message.audioBase64.isNotBlank()) {
-                                                    "${message.decryptedText} • AAC"
-                                                } else {
-                                                    message.decryptedText
-                                                },
+                                                text = message.decryptedText,
                                                 style = MaterialTheme.typography.labelSmall,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                                             )
@@ -2050,53 +2087,32 @@ private fun EncryptedMessageBubble(
 
                 Spacer(modifier = Modifier.height(6.dp))
 
-                // Ciphertext snippet, Ratchet step, Edited badge, Timestamp & Read Receipt Checkmarks
+                // Edited badge, Timestamp & Read Receipt Checkmarks
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    horizontalArrangement = Arrangement.End,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.clickable(onClick = onInspectCipher)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Code,
-                            contentDescription = "Zarfı İncele",
-                            tint = NeonCyberGreen.copy(alpha = 0.75f),
-                            modifier = Modifier.size(13.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
+                    if (message.isEdited) {
                         Text(
-                            text = "R#${message.ratchetStep} • ${message.ciphertext.take(8)}...",
-                            fontFamily = JetBrainsMonoFontFamily,
+                            text = "(düzenlendi) ",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = CyberCyan
                         )
                     }
-
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (message.isEdited) {
-                            Text(
-                                text = "(düzenlendi) ",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = CyberCyan
-                            )
-                        }
-                        Text(
-                            text = timeText,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                    Text(
+                        text = timeText,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (isMine) {
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Icon(
+                            imageVector = if (message.readByCount > 1) Icons.Default.DoneAll else Icons.Default.Done,
+                            contentDescription = if (message.readByCount > 1) "Okundu" else "İletildi",
+                            tint = if (message.readByCount > 1) NeonCyberGreen else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(15.dp)
                         )
-                        if (isMine) {
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Icon(
-                                imageVector = if (message.readByCount > 1) Icons.Default.DoneAll else Icons.Default.Done,
-                                contentDescription = if (message.readByCount > 1) "Okundu" else "İletildi",
-                                tint = if (message.readByCount > 1) NeonCyberGreen else MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(15.dp)
-                            )
-                        }
                     }
                 }
 
@@ -2639,7 +2655,7 @@ private fun GroupManagementAndKeyRotationDialog(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "Oda Şifreleme Anahtarını Yenile (Key Rotation)",
+                        text = "Güvenlik Anahtarını Yenile",
                         color = AmberTimerWarning,
                         fontWeight = FontWeight.Bold
                     )
@@ -2661,7 +2677,7 @@ private fun GroupManagementAndKeyRotationDialog(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "☢️ Sohbet Geçmişini Tamamen İmha Et (Nuke Room)",
+                        text = "Sohbet Geçmişini Temizle",
                         color = BurnCoralRed,
                         fontWeight = FontWeight.Bold
                     )

@@ -199,7 +199,7 @@ fun ChatListAndDiscoveryScreen(
                         }
                     }
                     Text(
-                        text = if (myProfile != null) "@${myProfile.username} • ECDH P-256 + Ratchet Aktif" else "Anahtar Çifti Hazırlanıyor...",
+                        text = if (myProfile != null) "@${myProfile.username} • Çevrimiçi" else "Bağlanıyor...",
                         style = MaterialTheme.typography.labelSmall,
                         color = NeonCyberGreen
                     )
@@ -290,7 +290,7 @@ fun ChatListAndDiscoveryScreen(
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "Çevrimdışı Kuyruk: $pendingOutboxCount şifreli zarf bekliyor",
+                                text = "Çevrimdışı Kuyruk: $pendingOutboxCount mesaj bekliyor",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = AmberTimerWarning
                             )
@@ -405,14 +405,14 @@ fun ChatListAndDiscoveryScreen(
                 }
                 item {
                     CyberFilterChip(
-                        label = "İstekler 🤝 (${pendingRequestRooms.size})",
+                        label = "İstekler (${pendingRequestRooms.size})",
                         selected = selectedFilter == "REQUESTS",
                         onClick = { selectedFilter = "REQUESTS" }
                     )
                 }
                 item {
                     CyberFilterChip(
-                        label = "Birebir (P2P)",
+                        label = "Kişiler",
                         selected = selectedFilter == "DIRECT",
                         onClick = { selectedFilter = "DIRECT" }
                     )
@@ -477,9 +477,9 @@ fun ChatListAndDiscoveryScreen(
                             ) {
                                 Text(
                                     text = if (searchQuery.isNotBlank()) {
-                                        "Küresel @kullanici_adi Arama & Eşleşme (${peers.size} dizin düğümü)"
+                                        "Kullanıcı Arama Sonuçları (${peers.size} kişi)"
                                     } else {
-                                        "Açık Anahtar Dizini (@kullanici_adi ile Bağlan)"
+                                        "Kişiler (@kullanici_adi ile Bağlan)"
                                     },
                                     style = MaterialTheme.typography.labelSmall,
                                     color = CyberCyan
@@ -514,14 +514,14 @@ fun ChatListAndDiscoveryScreen(
                                     userId = "peer_" + CryptoEngine.sha256Hex("ZEROCHAT_PEER::$cleanSearchedHandle").take(18),
                                     username = cleanSearchedHandle,
                                     displayName = "@$cleanSearchedHandle",
-                                    bio = "Küresel P2P Kriptografik Düğüm",
+                                    bio = "ZeroChat Kullanıcısı",
                                     publicKey = genPub,
                                     safetyFingerprint = genFp
                                 )
                                 val existingRoomForTarget = allRooms.firstOrNull { room ->
                                     !room.isGroup &&
                                         (room.participantUids.contains(targetPeer.userId) ||
-                                            room.title.removePrefix("@").equals(targetPeer.username, ignoreCase = true))
+                                            room.peerHandleFor(myProfile?.username).equals(targetPeer.username, ignoreCase = true))
                                 }
 
                                 Card(
@@ -540,9 +540,9 @@ fun ChatListAndDiscoveryScreen(
                                             Column(modifier = Modifier.weight(1f)) {
                                                 Text(
                                                     text = if (exactMatchedPeer != null) {
-                                                        "✅ Dizin Eşleşmesi Bulundu: @${targetPeer.username}"
+                                                        "✅ Kullanıcı Bulundu: @${targetPeer.username}"
                                                     } else {
-                                                        "🔍 Küresel Düğüm Eşleşmesi: @${targetPeer.username}"
+                                                        "🔍 Kullanıcı: @${targetPeer.username}"
                                                     },
                                                     style = MaterialTheme.typography.titleSmall,
                                                     fontWeight = FontWeight.Bold,
@@ -550,9 +550,9 @@ fun ChatListAndDiscoveryScreen(
                                                 )
                                                 Text(
                                                     text = if (exactMatchedPeer != null) {
-                                                        "${targetPeer.displayName} • ${targetPeer.bio}"
+                                                        targetPeer.displayName
                                                     } else {
-                                                        "Bu kullanıcı adıyla doğrudan ECDH P-256 + AES-256-GCM uçtan uca şifreli sohbet başlatabilirsiniz."
+                                                        "Bu kullanıcıyla doğrudan güvenli sohbet başlatabilirsiniz."
                                                     },
                                                     style = MaterialTheme.typography.bodySmall,
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -651,11 +651,11 @@ fun ChatListAndDiscoveryScreen(
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = when (selectedFilter) {
-                            "REQUESTS" -> "İletişim & Takip İstekleri (Onay Bekleyenler)"
-                            "VAULT" -> "Gizli Arşiv Oturumları"
-                            "GROUPS" -> "Şifreli Grup Kanalları"
-                            "DIRECT" -> "Onaylı Birebir P2P Oturumları"
-                            else -> "Uçtan Uca Şifreli Sohbetler & İstekler"
+                            "REQUESTS" -> "Mesaj İstekleri"
+                            "VAULT" -> "Gizli Sohbetler"
+                            "GROUPS" -> "Gruplar"
+                            "DIRECT" -> "Kişiler"
+                            else -> "Sohbetler"
                         },
                         style = MaterialTheme.typography.labelSmall,
                         color = NeonCyberGreen
@@ -666,7 +666,7 @@ fun ChatListAndDiscoveryScreen(
                     is UiState.Loading -> {
                         item {
                             Text(
-                                text = "Şifreli zarflar senkronize ediliyor...",
+                                text = "Sohbetler yükleniyor...",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(vertical = 16.dp)
@@ -708,7 +708,7 @@ fun ChatListAndDiscoveryScreen(
                             items(filteredRooms, key = { it.id }) { room ->
                                 val isLocked = lockedRoomIds.contains(room.id)
                                 val isPinned = pinnedRoomIds.contains(room.id)
-                                val roomHandle = room.title.removePrefix("@").trim().lowercase(Locale.ROOT)
+                                val roomHandle = room.peerHandleFor(myProfile?.username).trim().lowercase(Locale.ROOT)
                                 val isVerified = verifiedPeerHandles.contains(roomHandle)
                                 val hasKeyChanged = keyChangedPeerHandles.contains(roomHandle)
                                 EncryptedRoomCard(
@@ -898,7 +898,7 @@ private fun IncomingRequestsInboxSection(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = "📨 Gelen İletişim & Takip İstekleri (${incomingRooms.size})",
+                    text = "📨 Gelen Sohbet İstekleri (${incomingRooms.size})",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
                     color = CyberCyan
@@ -906,7 +906,7 @@ private fun IncomingRequestsInboxSection(
             }
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "Sizi kullanıcı adınızla bulan düğümler şifreli iletişim kurmak için onayınızı bekliyor:",
+                text = "Sizinle mesajlaşmak isteyen kişiler:",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -914,9 +914,9 @@ private fun IncomingRequestsInboxSection(
 
             incomingRooms.forEach { reqRoom ->
                 val notePreview = remember(reqRoom.lastCipherPreview, reqRoom.roomKeyHint) {
-                    CryptoEngine.decrypt(reqRoom.lastCipherPreview, "", reqRoom.roomKeyHint)
-                        .takeIf { !it.startsWith("[Şifre") }
-                        ?: "🤝 @${reqRoom.requesterUsername} sizinle uçtan uca şifreli iletişim kurmak istiyor."
+                    CryptoEngine.decryptPreviewPacket(reqRoom.lastCipherPreview, reqRoom.roomKeyHint)
+                        .takeIf { it != "🔒 Şifreli mesaj" }
+                        ?: "🤝 @${reqRoom.requesterUsername} sizinle sohbet başlatmak istiyor."
                 }
                 Surface(
                     shape = RoundedCornerShape(12.dp),
@@ -940,8 +940,7 @@ private fun IncomingRequestsInboxSection(
                                 color = NeonCyberGreen
                             )
                             Text(
-                                text = "ECDH El Sıkışma İsteği",
-                                fontFamily = JetBrainsMonoFontFamily,
+                                text = "Yeni İstek",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = CyberCyan
                             )
@@ -1050,24 +1049,15 @@ private fun SendConnectionRequestDialog(
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "Açık Anahtar: ${peer.publicKey.take(32)}...",
-                            fontFamily = JetBrainsMonoFontFamily,
+                            text = "🔒 Uçtan uca şifreli bağlantı",
                             style = MaterialTheme.typography.labelSmall,
                             color = CyberCyan
                         )
-                        if (peer.safetyFingerprint.isNotBlank()) {
-                            Text(
-                                text = "Parmak İzi: ${peer.safetyFingerprint.take(29)}...",
-                                fontFamily = JetBrainsMonoFontFamily,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
                     }
                 }
                 Spacer(modifier = Modifier.height(10.dp))
                 Text(
-                    text = "ZeroChat güvenlik politikası gereği, kullanıcı adıyla bulunan düğümlerle mesajlaşabilmek için karşı tarafın iletişim/takip isteğinizi onaylaması gerekir.",
+                    text = "Bu kullanıcıya ilk mesajınızla birlikte bir sohbet isteği gönderilecektir.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -1209,23 +1199,6 @@ private fun DirectoryPeerChipCard(
                 }
             }
             Spacer(modifier = Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    imageVector = Icons.Default.Key,
-                    contentDescription = null,
-                    tint = CyberCyan,
-                    modifier = Modifier.size(13.dp)
-                )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(
-                    text = peer.publicKey.take(22) + "...",
-                    fontFamily = JetBrainsMonoFontFamily,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1
-                )
-            }
-            Spacer(modifier = Modifier.height(8.dp))
             Surface(
                 shape = RoundedCornerShape(8.dp),
                 color = when (connectionStatus) {
@@ -1238,10 +1211,10 @@ private fun DirectoryPeerChipCard(
             ) {
                 Text(
                     text = when (connectionStatus) {
-                        "APPROVED" -> "✓ Bağlı • Mesajlaş →"
-                        "OUTGOING_PENDING" -> "⏳ İstek Gönderildi (Bekliyor)"
+                        "APPROVED" -> "✓ Mesajlaş →"
+                        "OUTGOING_PENDING" -> "⏳ İstek Gönderildi"
                         "INCOMING_PENDING" -> "📨 İstek Geldi • Onayla →"
-                        else -> "➕ İletişim / Takip İsteği Gönder"
+                        else -> "➕ Mesaj Gönder"
                     },
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Bold,
@@ -1275,15 +1248,12 @@ private fun EncryptedRoomCard(
 ) {
     val isIncomingReq = room.isIncomingRequestFor(myUsername)
     val isOutgoingReq = room.isOutgoingRequestFrom(myUsername)
+    val displayTitle = remember(room.title, room.participantNames, room.isGroup, myUsername) {
+        room.displayTitleFor(myUsername)
+    }
 
     val decryptedPreview = remember(room.lastCipherPreview, room.roomKeyHint) {
-        if (room.lastCipherPreview.isBlank()) {
-            "Uçtan uca şifreli kanal hazır"
-        } else {
-            CryptoEngine.decrypt(room.lastCipherPreview, "", room.roomKeyHint)
-                .takeIf { !it.startsWith("[Şifre") }
-                ?: "🔒 AES-256-GCM: ${room.lastCipherPreview.take(28)}..."
-        }
+        CryptoEngine.decryptPreviewPacket(room.lastCipherPreview, room.roomKeyHint)
     }
     val timeText = remember(room.updatedAt, room.createdAt) {
         val date = (room.updatedAt ?: room.createdAt)?.toDate() ?: Date()
@@ -1324,7 +1294,7 @@ private fun EncryptedRoomCard(
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Text(
-                            text = room.title.removePrefix("@").take(2).uppercase(Locale.ROOT),
+                            text = displayTitle.removePrefix("@").take(2).uppercase(Locale.ROOT),
                             style = MaterialTheme.typography.titleMedium,
                             color = if (room.isGroup) CyberCyan else NeonCyberGreen,
                             fontWeight = FontWeight.Bold
@@ -1351,7 +1321,7 @@ private fun EncryptedRoomCard(
                                 Spacer(modifier = Modifier.width(4.dp))
                             }
                             Text(
-                                text = room.title,
+                                text = displayTitle,
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.onSurface
@@ -1360,7 +1330,7 @@ private fun EncryptedRoomCard(
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Icon(
                                     imageVector = Icons.Default.CheckCircle,
-                                    contentDescription = "Doğrulanmış Düğüm",
+                                    contentDescription = "Doğrulanmış Kişi",
                                     tint = NeonCyberGreen,
                                     modifier = Modifier.size(14.dp)
                                 )
@@ -1437,9 +1407,9 @@ private fun EncryptedRoomCard(
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text(
                                     text = when {
-                                        room.isRejectedRequest -> "⛔ İletişim İsteği Reddedildi"
-                                        isIncomingReq -> "📨 Gelen İletişim / Takip İsteği (Onayınızı Bekliyor)"
-                                        else -> "⏳ İletişim İsteği Gönderildi (Karşı Düğüm Onayı Bekleniyor)"
+                                        room.isRejectedRequest -> "⛔ İstek Reddedildi"
+                                        isIncomingReq -> "📨 Yeni Sohbet İsteği"
+                                        else -> "⏳ İstek Gönderildi"
                                     },
                                     style = MaterialTheme.typography.labelSmall,
                                     fontWeight = FontWeight.Bold,
@@ -1455,7 +1425,7 @@ private fun EncryptedRoomCard(
                     }
 
                     Text(
-                        text = if (room.lastSenderName.isNotBlank()) {
+                        text = if (room.isGroup && room.lastSenderName.isNotBlank()) {
                             "@${room.lastSenderName}: $decryptedPreview"
                         } else {
                             decryptedPreview
@@ -1466,15 +1436,16 @@ private fun EncryptedRoomCard(
                         overflow = TextOverflow.Ellipsis
                     )
 
-                    Spacer(modifier = Modifier.height(4.dp))
-
-                    Text(
-                        text = "Katılımcılar: ${room.participantNames}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = CyberCyan.copy(alpha = 0.85f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    if (room.isGroup && room.participantNames.isNotBlank()) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Üyeler: ${room.participantNames}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CyberCyan.copy(alpha = 0.85f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
 
                 IconButton(

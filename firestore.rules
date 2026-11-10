@@ -80,7 +80,12 @@ service cloud.firestore {
              data.participantUids[0] is string &&
              data.callType is string && data.callType in ['AUDIO', 'VIDEO'] &&
              data.status is string && data.status in ['RINGING', 'CONNECTED', 'ENDED'] &&
-             data.safetyEmojis is string && data.safetyEmojis.size() >= 1 && data.safetyEmojis.size() <= 64;
+             data.safetyEmojis is string && data.safetyEmojis.size() >= 1 && data.safetyEmojis.size() <= 64 &&
+             (!('callerAudioB64' in data) || (data.callerAudioB64 is string && data.callerAudioB64.size() <= 131072)) &&
+             (!('calleeAudioB64' in data) || (data.calleeAudioB64 is string && data.calleeAudioB64.size() <= 131072)) &&
+             (!('callerVideoB64' in data) || (data.callerVideoB64 is string && data.callerVideoB64.size() <= 131072)) &&
+             (!('calleeVideoB64' in data) || (data.calleeVideoB64 is string && data.calleeVideoB64.size() <= 131072)) &&
+             (!('mediaSeq' in data) || (data.mediaSeq is int && data.mediaSeq >= 0 && data.mediaSeq <= 100000000));
     }
 
     // 1. /users/{userId} - Public Cryptographic Key & Username Directory (Zero PII)
@@ -202,7 +207,7 @@ service cloud.firestore {
                        incoming().callerId == request.auth.uid &&
                        request.auth.uid in incoming().participantUids &&
                        incoming().keys().hasAll(['callerId', 'callerUsername', 'calleeUsername', 'participantUids', 'callType', 'status', 'safetyEmojis', 'createdAt', 'updatedAt']) &&
-                       incoming().keys().hasOnly(['callerId', 'callerUsername', 'calleeUsername', 'participantUids', 'callType', 'status', 'safetyEmojis', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['callerId', 'callerUsername', 'calleeUsername', 'participantUids', 'callType', 'status', 'safetyEmojis', 'callerAudioB64', 'calleeAudioB64', 'callerVideoB64', 'calleeVideoB64', 'mediaSeq', 'createdAt', 'updatedAt']) &&
                        incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
                        isValidCallSignal(incoming());
@@ -215,7 +220,7 @@ service cloud.firestore {
                        incoming().participantUids == existing().participantUids &&
                        incoming().createdAt == existing().createdAt &&
                        incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
-                       incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']);
+                       incoming().diff(existing()).affectedKeys().hasOnly(['status', 'callerAudioB64', 'calleeAudioB64', 'callerVideoB64', 'calleeVideoB64', 'mediaSeq', 'updatedAt']);
 
       allow delete: if isSignedIn() && isValidId(callId) && request.auth.uid in existing().participantUids;
     }

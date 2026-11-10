@@ -61,7 +61,6 @@ import com.example.crypto.CryptoEngine
 import com.example.data.model.ChatRoom
 import com.example.data.model.DecryptedMessageItem
 import com.example.data.model.UserProfile
-import com.example.ui.theme.AmberTimerWarning
 import com.example.ui.theme.CyberCyan
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.NeonCyberGreen
@@ -103,7 +102,7 @@ fun CyberQrMatrix(
             if (qrBitmap != null) {
                 Image(
                     bitmap = qrBitmap,
-                    contentDescription = "Gerçek Taranabilir Kriptografik QR Kod",
+                    contentDescription = "Güvenlik Doğrulama QR Kodu",
                     contentScale = ContentScale.Fit,
                     modifier = Modifier.fillMaxSize()
                 )
@@ -115,20 +114,37 @@ fun CyberQrMatrix(
 @Composable
 fun RoomSafetyAndCipherInspectorDialog(
     room: ChatRoom,
+    myUsername: String? = null,
     inspectedMessage: DecryptedMessageItem?,
     isPeerVerified: Boolean = false,
     hasKeyChangedWarning: Boolean = false,
     onVerifyIdentity: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
-    val safetyNumber = remember(room.roomKeyHint) {
-        CryptoEngine.generateIdentityMaterial(room.id, room.roomKeyHint).second
+    val peerHandle = remember(room.title, room.participantNames, myUsername) {
+        room.peerHandleFor(myUsername)
     }
-    val emojis = remember(room.roomKeyHint) {
-        CryptoEngine.deriveSafetyEmojis(room.roomKeyHint)
+    val safetyNumber = remember(myUsername, peerHandle, room.effectiveRoomKeyHint) {
+        if (!room.isGroup) {
+            CryptoEngine.deriveCanonicalSafetyNumber(
+                usernameA = myUsername,
+                usernameB = peerHandle,
+                fallbackSeed = room.effectiveRoomKeyHint
+            )
+        } else {
+            CryptoEngine.generateIdentityMaterial(room.id, room.effectiveRoomKeyHint).second
+        }
     }
-    val peerHandle = remember(room.title) {
-        room.title.removePrefix("@").trim()
+    val emojis = remember(myUsername, peerHandle, room.effectiveRoomKeyHint) {
+        if (!room.isGroup) {
+            CryptoEngine.deriveCanonicalPeerSafetyEmojis(
+                usernameA = myUsername,
+                usernameB = peerHandle,
+                fallbackSeed = room.effectiveRoomKeyHint
+            )
+        } else {
+            CryptoEngine.deriveSafetyEmojis(room.effectiveRoomKeyHint)
+        }
     }
 
     Dialog(onDismissRequest = onDismiss) {
@@ -137,7 +153,7 @@ fun RoomSafetyAndCipherInspectorDialog(
             colors = CardDefaults.cardColors(
                 containerColor = MaterialTheme.colorScheme.surface
             ),
-            border = BorderStroke(1.dp, NeonCyberGreen.copy(alpha = 0.5f)),
+            border = BorderStroke(1.dp, NeonCyberGreen.copy(alpha = 0.45f)),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(
@@ -160,7 +176,7 @@ fun RoomSafetyAndCipherInspectorDialog(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "ECDH + AES-256-GCM Denetçi",
+                            text = "Güvenlik ve Doğrulama",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
@@ -182,40 +198,44 @@ fun RoomSafetyAndCipherInspectorDialog(
                     seedData = "zerochat://peer?u=${Uri.encode(peerHandle)}&fp=${Uri.encode(safetyNumber)}"
                 )
 
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
                 Surface(
-                    shape = RoundedCornerShape(12.dp),
+                    shape = RoundedCornerShape(14.dp),
                     color = MaterialTheme.colorScheme.primaryContainer,
+                    border = BorderStroke(1.dp, NeonCyberGreen.copy(alpha = 0.5f)),
                     modifier = Modifier.padding(vertical = 4.dp)
                 ) {
-                    Text(
-                        text = "Anahtar Emojileri:  $emojis",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = NeonCyberGreen,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(6.dp))
-
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = ObsidianBlack,
-                    border = BorderStroke(1.dp, CyberCyan.copy(alpha = 0.4f))
-                ) {
-                    Text(
-                        text = "Anahtar Değişimi: ECDH P-256 (secp256r1) + SHA-256 Ratchet",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = CyberCyan,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                    )
+                    Column(
+                        modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "Ortak Doğrulama Emojileri",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CyberCyan
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = emojis,
+                            style = MaterialTheme.typography.headlineMedium
+                        )
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
 
                 Text(
-                    text = "60 Haneli Güvenlik Numarası (Safety Number)",
+                    text = "Karşı cihazdaki ekranda da aynı 4 emojiyi ve güvenlik numarasını görüyorsanız sohbetiniz uçtan uca güvendedir.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Text(
+                    text = "60 Haneli Güvenlik Numarası",
                     style = MaterialTheme.typography.labelSmall,
                     color = CyberCyan
                 )
@@ -238,86 +258,40 @@ fun RoomSafetyAndCipherInspectorDialog(
                 }
 
                 if (inspectedMessage != null) {
-                    Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(14.dp))
                     Card(
                         colors = CardDefaults.cardColors(
                             containerColor = ObsidianBlack
                         ),
-                        border = BorderStroke(1.dp, CyberCyan.copy(alpha = 0.5f)),
+                        border = BorderStroke(1.dp, CyberCyan.copy(alpha = 0.4f)),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Column(modifier = Modifier.padding(12.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(
-                                        imageVector = Icons.Default.Lock,
-                                        contentDescription = null,
-                                        tint = CyberCyan,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = "Zarf Denetimi (AES-256-GCM)",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = CyberCyan
-                                    )
-                                }
-                                Surface(
-                                    shape = RoundedCornerShape(6.dp),
-                                    color = NeonCyberGreen.copy(alpha = 0.16f)
-                                ) {
-                                    Text(
-                                        text = "Ratchet Adımı #${inspectedMessage.ratchetStep}",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = NeonCyberGreen,
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                    )
-                                }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.Lock,
+                                    contentDescription = null,
+                                    tint = NeonCyberGreen,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Mesaj Güvenlik Bilgisi",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = NeonCyberGreen,
+                                    fontWeight = FontWeight.Bold
+                                )
                             }
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(
-                                text = "Ağ Üzerindeki Şifreli Yük (Ciphertext):",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Text(
-                                text = inspectedMessage.ciphertext,
-                                fontFamily = JetBrainsMonoFontFamily,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = NeonCyberGreen
-                            )
                             Spacer(modifier = Modifier.height(6.dp))
                             Text(
-                                text = "GCM Başlatma Vektörü (96-bit IV): ${inspectedMessage.iv}",
-                                fontFamily = JetBrainsMonoFontFamily,
+                                text = "Gönderen: @${inspectedMessage.senderUsername}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = CyberCyan
+                            )
+                            Text(
+                                text = "Durum: ✓✓ Uçtan uca şifreli olarak iletildi",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Text(
-                                text = "SHA-256 İmza: ${inspectedMessage.signatureHash}",
-                                fontFamily = JetBrainsMonoFontFamily,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Text(
-                                text = "Okundu Bilgisi: ✓✓ ${inspectedMessage.readByCount} Düğüm Tarafından Çözüldü",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = AmberTimerWarning
-                            )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = "Cihazda Çözülen Metin (Plaintext):",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Text(
-                                text = inspectedMessage.decryptedText,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onBackground
                             )
                         }
                     }
@@ -344,9 +318,9 @@ fun RoomSafetyAndCipherInspectorDialog(
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = when {
-                            hasKeyChangedWarning -> "Yeni Anahtarı Onayla ve MITM Uyarısını Kaldır"
-                            isPeerVerified -> "🛡️ Doğrulanmış Düğüm (Verified Mühürlü)"
-                            else -> "Parmak İzini Doğrula ve Mühürle (Verify)"
+                            hasKeyChangedWarning -> "Yeni Güvenlik Anahtarını Onayla"
+                            isPeerVerified -> "🛡️ Doğrulanmış Kişi"
+                            else -> "Kişiyi Doğrulanmış Olarak İşaretle"
                         },
                         fontWeight = FontWeight.Bold
                     )
@@ -364,10 +338,10 @@ fun QrScannerAndVerifierDialog(
     onScanVerified: (String) -> Unit
 ) {
     var manualKeyOrHandle by remember { mutableStateOf("") }
-    var selectedTab by remember { mutableIntStateOf(0) } // 0 = Canlı Kamera QR Tarayıcı, 1 = Benim QR Kodum
+    var selectedTab by remember { mutableIntStateOf(0) } // 0 = Kamerayla Tara, 1 = Benim QR Kodum
 
     val myQrPayload = remember(myProfile) {
-        val handle = myProfile?.username ?: "zerochat_node"
+        val handle = myProfile?.username ?: "zerochat_user"
         val uid = myProfile?.userId ?: "uid_$handle"
         val fp = myProfile?.safetyFingerprint ?: CryptoEngine.sha256Hex(handle).take(30)
         val pk = myProfile?.publicKey ?: "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE"
@@ -401,7 +375,7 @@ fun QrScannerAndVerifierDialog(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Canlı Kamera QR & Kimlik",
+                            text = "QR Kod ile Kişi Ekle & Doğrula",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
@@ -413,7 +387,6 @@ fun QrScannerAndVerifierDialog(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // Mode Switcher: Live Camera Scanner vs My QR Code
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -457,7 +430,6 @@ fun QrScannerAndVerifierDialog(
                 Spacer(modifier = Modifier.height(10.dp))
 
                 if (selectedTab == 0) {
-                    // REAL CAMERAX + ZXING QR SCANNER VIEW
                     RealCameraQrScannerView(
                         onQrCodeDetected = { rawQrText ->
                             onScanVerified(rawQrText)
@@ -467,7 +439,6 @@ fun QrScannerAndVerifierDialog(
                             .height(250.dp)
                     )
                 } else {
-                    // MY REAL SCANNABLE QR CODE
                     Surface(
                         shape = RoundedCornerShape(18.dp),
                         color = ObsidianBlack,
@@ -484,13 +455,13 @@ fun QrScannerAndVerifierDialog(
                             )
                             Spacer(modifier = Modifier.height(8.dp))
                             Text(
-                                text = "@${myProfile?.username ?: "zerochat_node"}",
+                                text = "@${myProfile?.username ?: "kullanici"}",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = NeonCyberGreen
                             )
                             Text(
-                                text = "Karşı cihazın kamerasıyla bu QR kodu okuttuğunuzda ECDH P-256 anahtarınız doğrulanır ve anında eşleşir.",
+                                text = "Karşı cihazın kamerasıyla bu QR kodu okuttuğunuzda kişi anında doğrulanır ve sohbet başlar.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 textAlign = TextAlign.Center
@@ -502,7 +473,7 @@ fun QrScannerAndVerifierDialog(
                 if (availablePeers.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
-                        text = "Dizindeki Düğümleri Hızlı Doğrula & Eşleştir:",
+                        text = "Rehberdeki Kişilerle Hızlı Bağlan:",
                         style = MaterialTheme.typography.labelSmall,
                         color = CyberCyan,
                         modifier = Modifier.fillMaxWidth()
@@ -533,7 +504,7 @@ fun QrScannerAndVerifierDialog(
                                     )
                                     Spacer(modifier = Modifier.width(4.dp))
                                     Text(
-                                        text = "@${peer.username} Bağlan",
+                                        text = "@${peer.username}",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = NeonCyberGreen
                                     )
@@ -548,7 +519,7 @@ fun QrScannerAndVerifierDialog(
                 OutlinedTextField(
                     value = manualKeyOrHandle,
                     onValueChange = { manualKeyOrHandle = it },
-                    label = { Text("@kullanici_adi veya ZC-ECDH-P256 Anahtarı Gir") },
+                    label = { Text("@kullanici_adi Girin") },
                     singleLine = true,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -579,7 +550,7 @@ fun QrScannerAndVerifierDialog(
                         ),
                         modifier = Modifier.testTag("qr_verify_confirm_button")
                     ) {
-                        Text("Doğrula ve Eşleş", fontWeight = FontWeight.Bold)
+                        Text("Doğrula ve Bağlan", fontWeight = FontWeight.Bold)
                     }
                 }
             }

@@ -1,86 +1,94 @@
-# ZeroChat — Tam Kapsamlı Gerçek Donanım, Medya İletimi ve Sıfır-Simülasyon Mimari Planı
+# ZeroChat — Gerçek Zamanlı Arama, Bildirim, Sesli Mesaj ve Sadeleştirilmiş Koyu Siber Arayüz Planı
 
-Bu plan, ZeroChat uygulamasının tüm katmanlarında yapılan kapsamlı denetim sonucunda tespit edilen kısıtlamaların giderilmesini, cihazlar arası gerçek şifreli medya/ses/dosya aktarımının devreye alınmasını ve uygulama içerisindeki tüm test/simülasyon bileşenlerinin kalıcı olarak kaldırılmasını kapsar.
+Kullanıcıları korkutan karmaşık kriptografik/teknik terimleri temizleyerek mevcut koyu siber temayı modern ve anlaşılır hale getiriyor; sesli/görüntülü aramaları, doğrulama emojilerini, sesli mesaj gönderimini, otomatik mesaj kaydırmayı ve Android sistem bildirimlerini uçtan uca çalışır duruma kavuşturuyoruz.
 
-## Kullanıcı İncelemesi ve Onaylanan Kritik Kararlar
+## Kullanıcı Onayı ve Kararlaştırılan Tercihler
 
 > [!IMPORTANT]
-> Yanıtlarınız doğrultusunda aşağıdaki üç temel mimari karar kesinleştirilmiştir. Onayınızın ardından tüm güncellemeler doğrudan uygulanacaktır.
+> Sorulara verdiğiniz yanıtlar doğrultusunda aşağıdaki kararlar kesinleştirilmiştir:
 
-- **Onaylanan Karar 1 — Cihazlar Arası Gerçek Şifreli Medya ve Ses İletimi**: Kamera veya galeriden seçilen fotoğraflar, steganografi görselleri ve kaydedilen sesli notlar yalnızca cihaz içi yerel adres (`content://`) olarak bırakılmayacak; sıkıştırılmış ve `AES-256-GCM` ile uçtan uca şifrelenmiş gerçek Base64 veri yükü olarak bulut zarfları üzerinden karşı cihaza iletilecektir. Böylece alıcı cihaz görselleri doğrudan görüntüleyebilecek ve ses kayıtlarını kesintisiz dinleyebilecektir.
-- **Onaylanan Karar 2 — Etkileşimli Şifreli Belge İndirme ve Gerçek Harita Navigasyonu**: Sohbette gönderilen belgeler yalnızca dosya adı etiketi olmayacak; şifreli dosya içeriğiyle birlikte iletilecek ve üzerine dokunulduğunda Android sistem dosya kaydetme penceresi aracılığıyla cihaza indirilebilecektir. Konum mesajlarına dokunulduğunda ise gerçek GPS koordinatları doğrudan Google Haritalar veya cihazdaki harita uygulamasında açılacaktır.
-- **Onaylanan Karar 3 — Tüm Test ve Simülasyon Kodlarının Tamamen Silinmesi**: Kriptografik denetçi penceresindeki MITM anahtar değişimi test butonu ile durum yönetim katmanındaki tüm simülasyon durumları ve test fonksiyonları projeden tamamen temizlenecektir.
-
----
-
-## 1. Kapsamlı Denetim Bulguları ve Çözüm Özeti
-
-- **Bulgu 1 — Galeri Fotoğrafları ve Ses Kayıtlarının Karşı Cihazda Açılmaması**:
-  - *Mevcut Durum*: Kameradan çekilen fotoğraflar Base64 formatına dönüştürülürken, galeriden seçilen fotoğraflar yerel cihaz bağlantısı (`content://`) olarak gönderiliyor ve karşı cihazda görüntülenemiyordu. Ayrıca bulut güvenlik kurallarındaki düşük boyut sınırı (16 KB) nedeniyle 2 saniyeden uzun ses kayıtları sessizce engelleniyordu.
-  - *Çözüm*: Galeri ve steganografi seçicilerinden gelen tüm görseller otomatik olarak optimize edilmiş JPEG verisine dönüştürülüp şifrelenecek. Bulut şifreli zarf kapasitesi 256 KB seviyesine yükseltilecek ve ses kayıt motoru optimize edilerek uzun sesli notların karşı cihaza eksiksiz ulaşması sağlanacak.
-- **Bulgu 2 — Etkileşimsiz Belge ve Konum Kartları**:
-  - *Mevcut Durum*: Belge gönderiminde yalnızca dosya adı ve boyutu gösteriliyor, alıcı dosyayı indiremiyordu. Konum mesajları ise düz metin balonunda kalıyor ve harita uygulamasını tetiklemiyordu.
-  - *Çözüm*: Seçilen belgeler şifreli Base64 yükü olarak mesaja eklenecek; alıcı belge balonuna dokunduğunda dosyayı cihazına kaydedebilecek. Konum balonlarına özel etkileşimli kart görünümü ve haritada açma aksiyonu eklenecek.
-- **Bulgu 3 — Kalan Simülasyon Fonksiyonları ve Test Düğmeleri**:
-  - *Mevcut Durum*: Kriptografik denetim penceresinde yer alan manuel MITM uyarı test butonu, arka plandaki simüle edilmiş çağrı/anahtar değişimi değişkenleri ve ses kaydı sırasındaki rastgele dalga boyu yedeklemesi gerçeklik ilkesini bozuyordu.
-  - *Çözüm*: Tüm test ve simülasyon fonksiyonları silinecek. Ses dalga formu yalnızca mikrofon donanımından gelen gerçek ses şiddeti (`maxAmplitude`) verisini yansıtacak; anahtar değişimi uyarıları ise yalnızca karşı kullanıcının buluttaki gerçek açık anahtarı değiştiğinde otomatik tetiklenecek.
-- **Bulgu 4 — Kasa Sekmesindeki Kişisel QR Kodun Tam Eşleşme Bilgisi İçermemesi**:
-  - *Mevcut Durum*: Kasa ve Profil ekranındaki kişisel QR kod yalnızca ham açık anahtar dizisini barındırdığı için başka bir cihaz tarafından tarandığında kullanıcı adı ve kimlik bilgilerini tam olarak çözümleyemiyordu.
-  - *Çözüm*: Kasa ekranındaki QR kod bileşeni, sohbet ekranındakiyle birebir aynı standart `zerochat://peer` bağlantı protokolünü (`@kullanici_adi`, kullanıcı kimliği, güvenlik parmak izi ve açık anahtar) üretecek şekilde birleştirilecek.
+- **Sohbet ve Mesaj Balonlarından Kaldırılacak Teknik Detaylar**:
+  - Mesaj balonlarının altındaki `R#1 • a8f9c2...` şifreli kod satırı ve `< >` zarf inceleme ikonu tamamen kaldırılacak; yalnızca saat ve okundu (`✓` / `✓✓`) bilgisi yer alacak.
+  - Sohbet üst başlığındaki `ECDH P-256 + Ratchet • Anahtarı Denetle` ifadeleri kaldırılarak yerine `Çevrimiçi • Uçtan Uca Şifreli` veya `@kullanici yazıyor...` durumu gösterilecek.
+  - Sohbetin en üstündeki karmaşık `Sıfır-Bilgi (Zero-Knowledge) ECDH + Forward Secrecy Oturumu` kutusu kaldırılarak tek satırlık sade `🔒 Mesajlar ve aramalar uçtan uca şifrelidir` rozetine dönüştürülecek.
+  - Sohbetler listesindeki anlaşılmaz şifreli önizleme (`AES-256-GCM: ...`) kaldırılarak doğrudan son mesajın çözülmüş anlaşılır metni gösterilecek.
+  - Tüm ekranlardaki `Zarf`, `Düğüm` ve `İmha` kelimeleri `Mesaj`, `Kişi / Kullanıcı` ve `Sil` olarak değiştirilecek.
+- **Profil ve Durumlar Ekranından Kaldırılacak Teknik Detaylar**:
+  - Durum kartlarındaki ve hikaye görüntüleyicideki `AES-256-GCM Zarfı: ...` ve `(IV: ...)` satırları tamamen kaldırılacak.
+  - Profil/Kasa sekmesindeki `Donanım Destekli Kriptografi Motoru / Keystore TEE / Hash Ratchet` teknik kartı tamamen kaldırılacak; kişisel QR kod, güvenlik numarası ve 4 emojili doğrulama korunacak.
+- **Görsel Tasarım Yönü**:
+  - Mevcut koyu siber tema (`ObsidianBlack`, `CarbonSurface`, `NeonCyberGreen`, `CyberCyan`) korunacak; ancak göz yoran kalın çerçeveler ve teknik kalabalık temizlenerek sade, modern ve akıcı bir görünüm sağlanacak.
+- **Gerçek Zamanlı P2P Arama ve Android Sistem Bildirimleri**:
+  - Sesli ve görüntülü aramalarda gerçek zamanlı ses/görüntü aktarımı ve yeni mesaj/arama/istek geldiğinde gerçek Android sistem bildirimleri (`NotificationCompat`) aktif edilecek.
 
 ---
 
-## 2. Teknik Mimari ve Gerçek Veri Akışı
+## 1. Genel Bakış ve Çözülecek 7 Ana Sorun
+
+1. **Çift Yönlü Gerçek Sesli ve Görüntülü Arama**: Arama başlatıldığında karşı kullanıcının gerçek bulut kimliği çözümlenecek, çağrı durumu (`RINGING`, `CONNECTED`, `ENDED`) iki cihazda canlı senkronize edilecek ve görüşme esnasında şifreli canlı ses dilimleri ile kamera görüntü kareleri karşı cihaza gerçek zamanlı aktarılacak.
+2. **İki Cihazda Birebir Aynı 4 Doğrulama Emojisi**: Rastgele arama ID'si veya geçici istek ön eki (`REQ_FROM::`) yerine her iki kullanıcının sıralı ortak anahtarı kullanılarak iki telefonda da her zaman aynı 4 güvenlik emojisinin görünmesi sağlanacak.
+3. **Sorunsuz Sesli Mesaj (Voice Note) Kaydı ve Gönderimi**: Tüm Android cihazlarla tam uyumlu `16 kHz / 32 kbps AAC` kayıt profili kullanılacak, mikrofon izni kontrolü iyileştirilecek ve tek dokunuşla kayıt/gönderim akışı hatasız çalışacak.
+4. **Yeni Mesajda Otomatik Aşağı Kaydırma (Auto-Scroll)**: Sohbete girildiğinde, yeni mesaj yazıldığında veya karşıdan mesaj geldiğinde mesaj listesi otomatik olarak en alttaki son mesaja kayacak.
+5. **Sadeleştirilmiş Koyu Siber Arayüz**: Koyu neon-yeşil/camgöbeği tema korunarak aşırı teknik yazılar, karmaşık kod satırları ve kalabalık çubuklar sadeleştirilecek.
+6. **Gerçek Android Bildirimleri**: Uygulama açıkken veya arka plandayken gelen mesajlar, iletişim istekleri ve aramalar için sesli/titreşimli Android sistem bildirimleri gösterilecek.
+7. **Kullanıcı Dostu Dil**: "Düğüm", "Zarf", "İmha", "Ratchet" gibi ifadeler tamamen günlük anlaşılır mesajlaşma diline çevrilecek.
+
+---
+
+## 2. Kullanıcı Deneyimi ve Görsel Tasarım
+
+- **Sohbet Listesi Deneyimi**:
+  - Her sohbet kartında kişinin adı (`@kullanici`), okunaklı son mesaj içeriği (ör. `"Merhaba, nasılsın?"`, `"📷 Fotoğraf"`, `"🎙️ Sesli mesaj"`), zaman damgası ve zarif durum rozeti yer alır.
+- **Sohbet İçi Deneyimi**:
+  - Üst barda yalnızca kişi adı, doğrulama kalkanı, sesli/görüntülü arama ve sadeleştirilmiş seçenekler bulunur.
+  - Mesaj balonları modern yuvarlatılmış köşelere, net tipografiye ve sağ altta yalnızca saat + okundu tiklerine (`✓✓`) sahiptir.
+  - Yeni mesaj gönderildiğinde veya alındığında liste yumuşak bir animasyonla (`animateScrollToItem`) en son mesaja iner.
+- **Canlı Arama Ekranı**:
+  - Arama çalarken (`Aranıyor...` / `Gelen Arama...`) ve bağlandığında (`00:14 • Şifreli Görüşme`) durumu canlı güncellenir; görüntülü aramada karşı tarafın canlı kamera görüntüsü ana ekranda, kendi kameramız sağ alt köşede (PiP) gösterilir.
+
+---
+
+## 3. Temel Ürün ve Mimari Kararlar
+
+- **Deterministik 4-Emoji Doğrulama Algoritması**:
+  - *Seçilen Yaklaşım*: Emojileri rastgele `callId` yerine `CryptoEngine.computeDirectRoomKeyHint(uidA, uidB)` ve sıralanmış kullanıcı adlarından türetmek.
+  - *Nedeni*: İki cihazda farklı zamanlarda veya farklı yönlerden açılan sohbet ve aramalarda %100 aynı 4 emojinin çıkmasını garanti eder.
+- **Gerçek Zamanlı Ses ve Görüntü Aktarımı**:
+  - *Seçilen Yaklaşım*: Firestore `calls` dokümanı üzerinden canlı çağrı durumu senkronizasyonu + aktif görüşme sırasında düşük gecikmeli şifreli ses/görüntü çerçeveleri (`callerAudioChunk`, `calleeAudioChunk`, `callerVideoFrame`, `calleeVideoFrame`) akışı.
+  - *Nedeni*: Ek bir harici TURN sunucusu gerektirmeden doğrudan mevcut şifreli bulut altyapısı üzerinde çift yönlü canlı ses ve görüntü iletimi sağlar.
+- **Standart AAC Ses Kaydı (`16 kHz`)**:
+  - *Seçilen Yaklaşım*: `MediaRecorder` örnekleme hızını `12000 Hz` yerine tüm Android donanım kodeklerinin desteklediği `16000 Hz` ve `24000 bps` değerine ayarlamak, izin verilmişse doğrudan kaydı başlatmak.
+  - *Nedeni*: Bazı telefonlarda `prepare()` aşamasında oluşan sessiz çökmeleri tamamen ortadan kaldırır.
+
+---
+
+## 4. Teknik Mimari ve Veri Akışı
 
 ```
-┌────────────────────────────────────────────────────────────────────────────┐
-│                   ZeroChat Gönderici Cihaz (Donanım & E2EE)                │
-│                                                                            │
-│  ┌──────────────────────┐  ┌──────────────────────┐  ┌──────────────────┐  │
-│  │ Kamera & Galeri      │  │ Gerçek Mikrofon      │  │ Belge & Canlı    │  │
-│  │ Görsel Sıkıştırma    │  │ Donanımı (AAC Ses &  │  │ GPS Konum        │  │
-│  │ (JPEG -> Base64)     │  │ Gerçek Genlik Ölçümü)│  │ Okuyucu          │  │
-│  └──────────┬───────────┘  └──────────┬───────────┘  └────────┬─────────┘  │
-│             └─────────────────────────┼───────────────────────┘            │
-│                                       ▼                                    │
-│                     ┌───────────────────────────────────┐                  │
-│                     │   AES-256-GCM Şifreleme Motoru    │                  │
-│                     │  (Şifreli Yük + Şifreli Üstveri)  │                  │
-│                     └─────────────────┬─────────────────┘                  │
-└───────────────────────────────────────┼────────────────────────────────────┘
-                                        │
-                                        ▼ (256 KB'a Kadar Şifreli Zarf)
-┌────────────────────────────────────────────────────────────────────────────┐
-│                Güvenli Bulut Zarf & Dizin Katmanı (Firestore)              │
-│  • Doğrulanmış Zarf Boyutu Kapasitesi (262.144 Bayt Şifreli Yük & Meta)    │
-│  • Gerçek Zamanlı Açık Anahtar (Public Key) ve Parmak İzi Takibi           │
-└───────────────────────────────────────┬────────────────────────────────────┘
-                                        │
-                                        ▼
-┌────────────────────────────────────────────────────────────────────────────┐
-│                    ZeroChat Alıcı Cihaz (Çözümleme & Etkileşim)            │
-│                                                                            │
-│  ┌──────────────────────┐  ┌──────────────────────┐  ┌──────────────────┐  │
-│  │ Şifreli Görsel &     │  │ Sesli Not Çözümleme  │  │ Belge İndirme    │  │
-│  │ Steganografi Çözücü  │  │ ve MediaPlayer ile   │  │ (Cihaza Kaydet) &│  │
-│  │ (Anında Görüntüleme) │  │ Gerçek Ses Oynatma   │  │ Haritalarda Aç   │  │
-│  └──────────────────────┘  └──────────────────────┘  └──────────────────┘  │
-└────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        ZeroChat Android İstemcisi                       │
+├───────────────────────┬─────────────────────────┬───────────────────────┤
+│   Sadeleştirilmiş UI  │  Gerçek Zamanlı Medya   │  Sistem Bildirimleri  │
+│  (Koyu Siber Tema)    │   (Ses & Kamera P2P)    │ (NotificationHelper)  │
+└───────────┬───────────┴────────────┬────────────┴───────────┬───────────┘
+            │                        │                        │
+            ▼                        ▼                        ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           ZeroChatViewModel                             │
+│  • Auto-Scroll State   • Canlı Arama Senkronu   • Yeni Mesaj/Arama Farkı│
+│  • Çözülmüş Önizleme   • Deterministik 4-Emoji  • Ses Kayıt Yönetimi    │
+└────────────────────────────────────┬────────────────────────────────────┘
+                                     │
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     ZeroChatRepository & CryptoEngine                   │
+│  • Gerçek Peer UID Çözümleme       • AES-256-GCM Şifreli Medya/Mesaj    │
+│  • Canlı CallSignal Akışı          • Ortak Anahtar Emoji Türetimi       │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
----
-
-## 3. Uygulama Adımları
-
-1. **Bulut Güvenlik Kuralları ve Zarf Kapasitesinin Güncellenmesi**:
-   - Şifreli mesaj zarflarındaki (`ciphertext` ve `encryptedMeta`) boyut sınırı 262.144 bayta çıkarılarak şifrelenmiş fotoğrafların, ses kayıtlarının ve belgelerin bulut üzerinden reddedilmeden karşı cihaza aktarılması sağlanacak.
-   - Güncellenen güvenlik kuralları yerel emülatör testleriyle doğrulanıp canlı bulut ortamına dağıtılacak.
-2. **Gerçek Medya, Ses ve Steganografi Aktarımı**:
-   - Galeriden seçilen fotoğraflar ve steganografi görselleri otomatik ölçeklendirilip JPEG Base64 veri yapısına dönüştürülerek şifrelenecek.
-   - Ses kayıt motorundaki rastgele dalga boyu üretimi kaldırılarak yalnızca gerçek mikrofon genliği kullanılacak; AAC bit hızı ve örnekleme frekansı optimize edilerek uzun sesli mesajların karşı cihaza iletilmesi sağlanacak.
-3. **Etkileşimli Belge İndirme ve Harita Entegrasyonu**:
-   - Sohbet içinden seçilen belgeler okunup şifreli üstveri içerisine dahil edilecek; belge mesajına tıklandığında sistem dosya kaydetme arayüzü açılarak dosyanın cihaza indirilmesi sağlanacak.
-   - Konum mesajları için özel etkileşimli kart tasarımı eklenecek ve dokunulduğunda koordinatları doğrudan harita uygulamasında açacak sistem bağlantısı tetiklenecek.
-4. **Simülasyonların Temizlenmesi ve QR Kimlik Standardizasyonu**:
-   - Denetçi penceresindeki MITM test butonu ve durum yönetimindeki tüm simülasyon metodları tamamen kaldırılacak; anahtar değişimi uyarıları yalnızca gerçek bulut profilindeki açık anahtar değişimlerine bağlanacak.
-   - Kasa ve Profil sekmesindeki QR kod bileşeni tam `zerochat://peer` bağlantı yapısıyla güncellenecek ve ardından tüm proje derlenerek doğrulanacak.
+### Etkileşim ve Durum Eşlemesi
+- **Mesaj Listesi Otomatik Kaydırma**: `LazyListState` mesaj sayısı değiştiğinde (`messages.size`) veya son mesaj ID'si güncellendiğinde otomatik olarak son indekse (`messages.lastIndex`) kayar.
+- **Sesli Not Kayıt Akışı**: Mikrofon butonuna basıldığında `ContextCompat.checkSelfPermission` kontrol edilir; izin varsa anında kayıt başlar, yoksa izin alınır alınmaz kayıt devreye girer.
+- **Gelen ve Giden Arama Akışı**: Arama başlatıldığında karşı kullanıcının gerçek UID'si bulunur; karşı taraf kabul ettiğinde (`CONNECTED`) her iki cihazda sayaç ve canlı ses/kamera akışı başlar; herhangi bir taraf kapattığında (`ENDED`) her iki cihazda arama ekranı otomatik kapanır.
+- **Android Sistem Bildirimi Akışı**: `POST_NOTIFICATIONS` izni ile yeni gelen mesajlarda gönderen adı ve çözülmüş mesaj içeriği, gelen aramalarda ise yüksek öncelikli arama bildirimi Android durum çubuğuna düşer.

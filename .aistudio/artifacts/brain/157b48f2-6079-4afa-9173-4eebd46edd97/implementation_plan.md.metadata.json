@@ -1,6 +1,6 @@
 {
-  "summary":  "ZeroChat uygulamasındaki tüm kalan demo/simülasyon öğelerinin kaldırılması, gerçek Base64 şifreli fotoğraf/ses/belge iletimi, etkileşimli dosya indirme ve harita açma aksiyonları ile tam kapsamlı kriptografik QR doğrulama mimarisini içeren uygulama planı.",
-  "updatedAt":  "2026-11-10T16:59:48.919246212Z",
+  "summary":  "Implementation plan for fixing voice/video calls with real-time encrypted audio/video streaming, synchronizing 4-emoji verification across devices, fixing voice note recording/sending, adding auto-scroll on new messages, adding Android system notifications, and simplifying the dark cyber UI by removing intimidating technical jargon.",
+  "updatedAt":  "2026-11-10T20:59:13.901772617Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

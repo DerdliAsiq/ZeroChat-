@@ -313,7 +313,7 @@ class ZeroChatRepository(
         val deterministicRoomId = "dm_" + CryptoEngine.sha256Hex(sortedUids.joinToString("_")).take(24)
         deletedRoomIdsFlow.value = deletedRoomIdsFlow.value - deterministicRoomId
         val roomKeyHint = CryptoEngine.computeDirectRoomKeyHint(uid, resolvedPeer.userId)
-        val initialCipher = CryptoEngine.encrypt("ECDH P-256 + AES-256-GCM uçtan uca şifreli tünel kuruldu", roomKeyHint)
+        val initialPreview = CryptoEngine.encryptPreviewPacket("🔒 Uçtan uca şifreli sohbet başlatıldı", roomKeyHint).take(220)
         val participantNames = listOf(myProfile.username, resolvedPeer.username).distinct().joinToString(",")
 
         val localRoom = ChatRoom(
@@ -324,7 +324,7 @@ class ZeroChatRepository(
             title = "@${resolvedPeer.username}",
             isGroup = false,
             roomKeyHint = roomKeyHint,
-            lastCipherPreview = initialCipher.ciphertext,
+            lastCipherPreview = initialPreview,
             lastSenderName = myProfile.username,
             defaultTtlSeconds = 0L,
             createdAt = Timestamp.now(),
@@ -357,7 +357,7 @@ class ZeroChatRepository(
             "title" to "@${resolvedPeer.username}",
             "isGroup" to false,
             "roomKeyHint" to roomKeyHint,
-            "lastCipherPreview" to initialCipher.ciphertext,
+            "lastCipherPreview" to initialPreview,
             "lastSenderName" to myProfile.username,
             "defaultTtlSeconds" to 0L,
             "createdAt" to FieldValue.serverTimestamp(),
@@ -391,9 +391,9 @@ class ZeroChatRepository(
         val requesterHandle = myProfile.username.ifBlank { "zero_${uid.take(5)}" }
         val pendingKeyHint = "REQ_FROM::${requesterHandle}::$baseKeyHint"
         val previewPlaintext = introNote.trim().ifBlank {
-            "🤝 @$requesterHandle şifreli iletişim ve takip isteği gönderdi (Onay Bekleniyor)"
+            "🤝 @$requesterHandle mesaj isteği gönderdi"
         }
-        val initialCipher = CryptoEngine.encrypt(previewPlaintext, pendingKeyHint)
+        val initialPreview = CryptoEngine.encryptPreviewPacket(previewPlaintext, pendingKeyHint).take(220)
         val participantNames = listOf(myProfile.username, resolvedPeer.username).distinct().joinToString(",")
 
         val localRoomObj = ChatRoom(
@@ -404,7 +404,7 @@ class ZeroChatRepository(
             title = "@${resolvedPeer.username}",
             isGroup = false,
             roomKeyHint = pendingKeyHint,
-            lastCipherPreview = initialCipher.ciphertext.take(180),
+            lastCipherPreview = initialPreview,
             lastSenderName = requesterHandle,
             defaultTtlSeconds = 0L,
             createdAt = Timestamp.now(),
@@ -440,9 +440,9 @@ class ZeroChatRepository(
             val updatePayload = mapOf(
                 "participantUids" to sortedUids,
                 "participantNames" to participantNames,
-                "title" to "@${peerProfile.username}",
+                "title" to "@${resolvedPeer.username}",
                 "roomKeyHint" to pendingKeyHint,
-                "lastCipherPreview" to initialCipher.ciphertext.take(180),
+                "lastCipherPreview" to initialPreview,
                 "lastSenderName" to requesterHandle,
                 "updatedAt" to FieldValue.serverTimestamp()
             )
@@ -459,10 +459,10 @@ class ZeroChatRepository(
                 "ownerId" to uid,
                 "participantUids" to sortedUids,
                 "participantNames" to participantNames,
-                "title" to "@${peerProfile.username}",
+                "title" to "@${resolvedPeer.username}",
                 "isGroup" to false,
                 "roomKeyHint" to pendingKeyHint,
-                "lastCipherPreview" to initialCipher.ciphertext.take(180),
+                "lastCipherPreview" to initialPreview,
                 "lastSenderName" to requesterHandle,
                 "defaultTtlSeconds" to 0L,
                 "createdAt" to FieldValue.serverTimestamp(),
@@ -488,11 +488,11 @@ class ZeroChatRepository(
     ): Result<ChatRoom> = runCatching {
         val uid = requireUserId()
         val approvedKeyHint = room.effectiveRoomKeyHint
-        val approvedText = "🤝 @$approverUsername iletişim ve takip isteğini onayladı! Uçtan uca şifreli tünel aktif."
-        val approvedCipher = CryptoEngine.encrypt(approvedText, approvedKeyHint)
+        val approvedText = "🤝 @$approverUsername sohbet isteğini kabul etti."
+        val approvedPreview = CryptoEngine.encryptPreviewPacket(approvedText, approvedKeyHint).take(220)
         val updatedRoom = room.copy(
             roomKeyHint = approvedKeyHint,
-            lastCipherPreview = approvedCipher.ciphertext.take(180),
+            lastCipherPreview = approvedPreview,
             lastSenderName = approverUsername,
             updatedAt = Timestamp.now()
         )
@@ -520,7 +520,7 @@ class ZeroChatRepository(
             docRef.update(
                 mapOf(
                     "roomKeyHint" to approvedKeyHint,
-                    "lastCipherPreview" to approvedCipher.ciphertext.take(180),
+                    "lastCipherPreview" to approvedPreview,
                     "lastSenderName" to approverUsername,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
@@ -555,13 +555,13 @@ class ZeroChatRepository(
     ): Result<ChatRoom> = runCatching {
         requireUserId()
         val rejectedKeyHint = "REQ_REJECTED::${actorUsername}::${room.effectiveRoomKeyHint}"
-        val rejectedPreview = CryptoEngine.encrypt(
-            "⛔ İletişim ve takip isteği @$actorUsername tarafından reddedildi / iptal edildi.",
+        val rejectedPreview = CryptoEngine.encryptPreviewPacket(
+            "⛔ Sohbet isteği @$actorUsername tarafından reddedildi.",
             rejectedKeyHint
-        )
+        ).take(220)
         val updatedRoom = room.copy(
             roomKeyHint = rejectedKeyHint,
-            lastCipherPreview = rejectedPreview.ciphertext.take(180),
+            lastCipherPreview = rejectedPreview,
             lastSenderName = actorUsername,
             updatedAt = Timestamp.now()
         )
@@ -576,7 +576,7 @@ class ZeroChatRepository(
             docRef.update(
                 mapOf(
                     "roomKeyHint" to rejectedKeyHint,
-                    "lastCipherPreview" to rejectedPreview.ciphertext.take(180),
+                    "lastCipherPreview" to rejectedPreview,
                     "lastSenderName" to actorUsername,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
@@ -601,7 +601,7 @@ class ZeroChatRepository(
         val allParticipants = (listOf(uid) + selectedPeers.map { it.userId }).distinct().take(10)
         val allNames = (listOf(myProfile.username) + selectedPeers.map { it.username }).distinct().joinToString(",")
         val roomKeyHint = "GRP_" + CryptoEngine.sha256Hex("${docRef.id}::$uid").take(24)
-        val initialCipher = CryptoEngine.encrypt("Şifreli grup kanalı oluşturuldu", roomKeyHint)
+        val initialPreview = CryptoEngine.encryptPreviewPacket("👥 Grup sohbeti oluşturuldu", roomKeyHint).take(220)
         val cleanedTitle = groupTitle.trim().ifBlank { "Siber Grup" }.take(80)
 
         val localGroup = ChatRoom(
@@ -612,7 +612,7 @@ class ZeroChatRepository(
             title = cleanedTitle,
             isGroup = true,
             roomKeyHint = roomKeyHint,
-            lastCipherPreview = initialCipher.ciphertext,
+            lastCipherPreview = initialPreview,
             lastSenderName = myProfile.username,
             defaultTtlSeconds = defaultTtlSeconds,
             createdAt = Timestamp.now(),
@@ -631,7 +631,7 @@ class ZeroChatRepository(
             "title" to cleanedTitle,
             "isGroup" to true,
             "roomKeyHint" to roomKeyHint,
-            "lastCipherPreview" to initialCipher.ciphertext,
+            "lastCipherPreview" to initialPreview,
             "lastSenderName" to myProfile.username,
             "defaultTtlSeconds" to defaultTtlSeconds,
             "createdAt" to FieldValue.serverTimestamp(),
@@ -719,10 +719,10 @@ class ZeroChatRepository(
     ): Result<ChatRoom> = runCatching {
         val uid = requireUserId()
         val newKeyHint = "ROT_" + CryptoEngine.sha256Hex("${room.id}::$uid::${System.currentTimeMillis()}").take(24)
-        val rotatedPreview = CryptoEngine.encrypt("🔄 Oda şifreleme anahtarı yenilendi (Key Rotation)", newKeyHint)
+        val rotatedPreview = CryptoEngine.encryptPreviewPacket("🔄 Güvenlik anahtarı yenilendi", newKeyHint).take(220)
         val updatedRoom = room.copy(
             roomKeyHint = newKeyHint,
-            lastCipherPreview = rotatedPreview.ciphertext.take(180),
+            lastCipherPreview = rotatedPreview,
             lastSenderName = senderUsername,
             updatedAt = Timestamp.now()
         )
@@ -735,7 +735,7 @@ class ZeroChatRepository(
             docRef.update(
                 mapOf(
                     "roomKeyHint" to newKeyHint,
-                    "lastCipherPreview" to rotatedPreview.ciphertext.take(180),
+                    "lastCipherPreview" to rotatedPreview,
                     "lastSenderName" to senderUsername,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
@@ -802,6 +802,7 @@ class ZeroChatRepository(
     ): Result<String> = runCatching {
         val uid = requireUserId()
         val encrypted = CryptoEngine.encrypt(plaintext, room.roomKeyHint, ratchetStep)
+        val previewPacket = CryptoEngine.encryptPreviewPacket(plaintext, room.roomKeyHint).take(220)
         val envId = "env_" + UUID.randomUUID().toString().replace("-", "").take(20)
         val localEnvelope = EncryptedEnvelope(
             id = envId,
@@ -824,7 +825,7 @@ class ZeroChatRepository(
         localRoomsFlow.value = localRoomsFlow.value.map {
             if (it.id == room.id) {
                 it.copy(
-                    lastCipherPreview = encrypted.ciphertext.take(180),
+                    lastCipherPreview = previewPacket,
                     lastSenderName = senderUsername,
                     updatedAt = Timestamp.now()
                 )
@@ -852,7 +853,7 @@ class ZeroChatRepository(
             envRef.set(payload).await()
             db.collection("rooms").document(room.id).update(
                 mapOf(
-                    "lastCipherPreview" to encrypted.ciphertext.take(180),
+                    "lastCipherPreview" to previewPacket,
                     "lastSenderName" to senderUsername,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
@@ -991,11 +992,11 @@ class ZeroChatRepository(
         val uid = requireUserId()
         val localCount = localEnvelopesFlow.value.count { it.roomId == room.id }
         localEnvelopesFlow.value = localEnvelopesFlow.value.filterNot { it.roomId == room.id }
-        val nukedPreview = CryptoEngine.encrypt("☢️ Sohbet geçmişi tamamen imha edildi (Nuke)", room.roomKeyHint)
+        val nukedPreview = CryptoEngine.encryptPreviewPacket("🧹 Sohbet geçmişi temizlendi", room.roomKeyHint).take(220)
         localRoomsFlow.value = localRoomsFlow.value.map {
             if (it.id == room.id) {
                 it.copy(
-                    lastCipherPreview = nukedPreview.ciphertext.take(180),
+                    lastCipherPreview = nukedPreview,
                     lastSenderName = senderUsername,
                     updatedAt = Timestamp.now()
                 )
@@ -1032,7 +1033,7 @@ class ZeroChatRepository(
         try {
             roomRef.update(
                 mapOf(
-                    "lastCipherPreview" to nukedPreview.ciphertext.take(180),
+                    "lastCipherPreview" to nukedPreview,
                     "lastSenderName" to senderUsername,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
@@ -1187,14 +1188,28 @@ class ZeroChatRepository(
         initialStatus: String = "RINGING"
     ): Result<CallSignal> = runCatching {
         val uid = requireUserId()
-        val callId = "call_" + UUID.randomUUID().toString().take(16)
-        val participants = listOf(uid, calleeUid).distinct()
-        val emojis = CryptoEngine.deriveSafetyEmojis("$callId::$uid::$calleeUid")
+        val cleanCalleeHandle = calleeUsername.trim().removePrefix("@").lowercase(Locale.ROOT)
+        val resolvedPeer = resolveRealPeerFromCloudIfAvailable(
+            UserProfile(
+                id = calleeUid,
+                userId = calleeUid,
+                username = cleanCalleeHandle
+            )
+        )
+        val realCalleeUid = resolvedPeer.userId.ifBlank { calleeUid }
+        val realCalleeHandle = resolvedPeer.username.ifBlank { cleanCalleeHandle }
+        val participants = listOf(uid, realCalleeUid).filter { it.isNotBlank() }.distinct()
+        val emojis = CryptoEngine.deriveCanonicalPeerSafetyEmojis(
+            usernameA = callerUsername,
+            usernameB = realCalleeHandle,
+            fallbackSeed = "$uid::$realCalleeUid"
+        )
+        val callId = "call_" + UUID.randomUUID().toString().replace("-", "").take(18)
         val localCall = CallSignal(
             id = callId,
             callerId = uid,
             callerUsername = callerUsername,
-            calleeUsername = calleeUsername,
+            calleeUsername = realCalleeHandle,
             participantUids = participants,
             callType = callType,
             status = initialStatus,
@@ -1202,20 +1217,25 @@ class ZeroChatRepository(
             createdAt = Timestamp.now(),
             updatedAt = Timestamp.now()
         )
+        localCallsFlow.value = listOf(localCall) + localCallsFlow.value.filterNot { it.id == callId }
         if (isLocalNodeMode()) {
-            localCallsFlow.value = listOf(localCall) + localCallsFlow.value
             return@runCatching localCall
         }
 
-        val callRef = db.collection("calls").document()
+        val callRef = db.collection("calls").document(callId)
         val payload = mapOf(
             "callerId" to uid,
             "callerUsername" to callerUsername,
-            "calleeUsername" to calleeUsername,
+            "calleeUsername" to realCalleeHandle,
             "participantUids" to participants,
             "callType" to callType,
             "status" to initialStatus,
             "safetyEmojis" to emojis,
+            "callerAudioB64" to "",
+            "calleeAudioB64" to "",
+            "callerVideoB64" to "",
+            "calleeVideoB64" to "",
+            "mediaSeq" to 0L,
             "createdAt" to FieldValue.serverTimestamp(),
             "updatedAt" to FieldValue.serverTimestamp()
         )
@@ -1224,7 +1244,6 @@ class ZeroChatRepository(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            localCallsFlow.value = listOf(localCall) + localCallsFlow.value
             return@runCatching localCall
         }
         callRef.get().await().toObject(CallSignal::class.java, DocumentSnapshot.ServerTimestampBehavior.ESTIMATE)
@@ -1235,7 +1254,7 @@ class ZeroChatRepository(
         requireUserId()
         if (isLocalNodeMode() || localCallsFlow.value.any { it.id == callId }) {
             localCallsFlow.value = localCallsFlow.value.map {
-                if (it.id == callId) it.copy(status = "CONNECTED") else it
+                if (it.id == callId) it.copy(status = "CONNECTED", updatedAt = Timestamp.now()) else it
             }
             if (isLocalNodeMode()) return@runCatching
         }
@@ -1251,11 +1270,36 @@ class ZeroChatRepository(
         }
     }
 
+    suspend fun pushCallMediaChunk(
+        callId: String,
+        isCaller: Boolean,
+        audioB64: String? = null,
+        videoB64: String? = null,
+        nextSeq: Long
+    ): Result<Unit> = runCatching {
+        requireUserId()
+        if (callId.isBlank() || isLocalNodeMode()) return@runCatching
+        val updates = mutableMapOf<String, Any>(
+            "mediaSeq" to nextSeq,
+            "updatedAt" to FieldValue.serverTimestamp()
+        )
+        if (!audioB64.isNullOrBlank() && audioB64.length <= 92000) {
+            updates[if (isCaller) "callerAudioB64" else "calleeAudioB64"] = audioB64
+        }
+        if (!videoB64.isNullOrBlank() && videoB64.length <= 92000) {
+            updates[if (isCaller) "callerVideoB64" else "calleeVideoB64"] = videoB64
+        }
+        try {
+            db.collection("calls").document(callId).update(updates).await()
+        } catch (_: Exception) {
+        }
+    }
+
     suspend fun endEncryptedCall(callId: String): Result<Unit> = runCatching {
         requireUserId()
         if (isLocalNodeMode() || localCallsFlow.value.any { it.id == callId }) {
             localCallsFlow.value = localCallsFlow.value.map {
-                if (it.id == callId) it.copy(status = "ENDED") else it
+                if (it.id == callId) it.copy(status = "ENDED", updatedAt = Timestamp.now()) else it
             }
             if (isLocalNodeMode()) return@runCatching
         }

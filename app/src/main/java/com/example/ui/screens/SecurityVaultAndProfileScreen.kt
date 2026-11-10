@@ -25,7 +25,6 @@ import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Shield
@@ -166,70 +165,15 @@ fun SecurityVaultAndProfileScreen(
             .padding(horizontal = 16.dp, vertical = 12.dp)
     ) {
         Text(
-            text = "Güvenlik Kasası & Donanım Anahtarı",
+            text = "Profil & Güvenlik Kasası",
             style = MaterialTheme.typography.headlineMedium,
             color = MaterialTheme.colorScheme.onBackground
         )
         Text(
-            text = "Android Keystore ECDH P-256 kimliğinizi, Biyometrik Kasa Kilidini, yıldızlı zarfları ve fiziksel .zcvault yedeklerini yönetin.",
+            text = "Kullanıcı profilinizi, biyometrik kasa kilidini, yıldızlı mesajları ve şifreli yedeklerinizi yönetin.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Hardware Keystore ECDH P-256 & Forward Secrecy Status Card
-        Card(
-            shape = RoundedCornerShape(20.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            border = BorderStroke(1.dp, CyberCyan.copy(alpha = 0.55f)),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.Memory,
-                        contentDescription = null,
-                        tint = CyberCyan,
-                        modifier = Modifier.size(22.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Column {
-                        Text(
-                            text = "Donanım Destekli Kriptografi Motoru",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = hardwareKeyStatus?.algorithm ?: "EC P-256 (secp256r1) / AndroidKeyStore",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = NeonCyberGreen
-                        )
-                    }
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                Surface(
-                    shape = RoundedCornerShape(10.dp),
-                    color = ObsidianBlack,
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(10.dp)) {
-                        Text(
-                            text = "Keystore Durumu: ${if (hardwareKeyStatus?.isHardwareBacked == true) "Donanım (TEE/StrongBox) Korumalı" else "JCA EC P-256 Aktif"}",
-                            fontFamily = JetBrainsMonoFontFamily,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = CyberCyan
-                        )
-                        Text(
-                            text = "İleriye Dönük Gizlilik: Per-Message SHA-256 Hash Ratchet + Stego Katmanı Aktif",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = NeonCyberGreen
-                        )
-                    }
-                }
-            }
-        }
 
         Spacer(modifier = Modifier.height(16.dp))
 
@@ -237,7 +181,7 @@ fun SecurityVaultAndProfileScreen(
         Card(
             shape = RoundedCornerShape(20.dp),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            border = BorderStroke(1.dp, AmberTimerWarning.copy(alpha = 0.65f)),
+            border = BorderStroke(1.dp, AmberTimerWarning.copy(alpha = 0.55f)),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
@@ -255,7 +199,7 @@ fun SecurityVaultAndProfileScreen(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Yıldızlı Şifreli Zarflar (${starredMessages.size})",
+                            text = "Yıldızlı Mesajlar (${starredMessages.size})",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
@@ -264,7 +208,7 @@ fun SecurityVaultAndProfileScreen(
                 Spacer(modifier = Modifier.height(8.dp))
                 if (starredMessages.isEmpty()) {
                     Text(
-                        text = "Henüz yıldızlanmış mesaj yok. Sohbet içindeki bir mesaja dokunup ⭐ simgesiyle kasaya sabitleyebilirsiniz.",
+                        text = "Henüz yıldızlanmış mesaj yok. Sohbet içindeki bir mesaja dokunup ⭐ simgesiyle buraya sabitleyebilirsiniz.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -274,7 +218,7 @@ fun SecurityVaultAndProfileScreen(
                             Surface(
                                 shape = RoundedCornerShape(12.dp),
                                 color = ObsidianBlack,
-                                border = BorderStroke(1.dp, AmberTimerWarning.copy(alpha = 0.45f)),
+                                border = BorderStroke(1.dp, AmberTimerWarning.copy(alpha = 0.4f)),
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Column(modifier = Modifier.padding(10.dp)) {
@@ -289,7 +233,6 @@ fun SecurityVaultAndProfileScreen(
                                         )
                                         Text(
                                             text = item.messageType,
-                                            fontFamily = JetBrainsMonoFontFamily,
                                             style = MaterialTheme.typography.labelSmall,
                                             color = AmberTimerWarning
                                         )
@@ -312,7 +255,7 @@ fun SecurityVaultAndProfileScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Physical Screen Security (FLAG_SECURE), Biometric Lock, Auto-Lock & Offline Outbox Card
+        // Screen Security, Biometric Lock, Auto-Lock & Offline Outbox Card
         Card(
             shape = RoundedCornerShape(20.dp),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -335,7 +278,7 @@ fun SecurityVaultAndProfileScreen(
                         Spacer(modifier = Modifier.width(8.dp))
                         Column {
                             Text(
-                                text = "Ekran Görüntüsü Engeli (FLAG_SECURE)",
+                                text = "Ekran Görüntüsü Engeli",
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.Bold
                             )
@@ -379,7 +322,7 @@ fun SecurityVaultAndProfileScreen(
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = "Donanım biyometrik doğrulaması ile gizli kasayı aç",
+                                text = "Parmak izi doğrulaması ile gizli kasayı aç",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -418,7 +361,7 @@ fun SecurityVaultAndProfileScreen(
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = "Uygulama alta alındığında (ON_STOP) kasayı anında kilitle",
+                                text = "Uygulama alta alındığında kasayı anında kilitle",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -452,12 +395,12 @@ fun SecurityVaultAndProfileScreen(
                         Spacer(modifier = Modifier.width(8.dp))
                         Column {
                             Text(
-                                text = "Çevrimdışı Şifreli Kuyruk Modu (Outbox)",
+                                text = "Çevrimdışı Mesaj Kuyruğu",
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = "Bekleyen şifreli zarf: $pendingOutboxCount adet",
+                                text = "Bekleyen mesaj: $pendingOutboxCount adet",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = AmberTimerWarning
                             )
@@ -482,7 +425,7 @@ fun SecurityVaultAndProfileScreen(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
-                            text = "Kuyruktaki $pendingOutboxCount Mesajı Şimdi Ağa Gönder",
+                            text = "Kuyruktaki $pendingOutboxCount Mesajı Şimdi Gönder",
                             color = NeonCyberGreen,
                             fontWeight = FontWeight.Bold
                         )
@@ -513,7 +456,7 @@ fun SecurityVaultAndProfileScreen(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "Kişisel Kriptografik Kimlik & QR",
+                        text = "Kişisel QR Kodum & Güvenlik Numaram",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
@@ -522,10 +465,10 @@ fun SecurityVaultAndProfileScreen(
                 Spacer(modifier = Modifier.height(12.dp))
 
                 val personalQrUri = remember(myProfile) {
-                    val handle = myProfile?.username ?: "zerochat_node"
+                    val handle = myProfile?.username ?: "zerochat_user"
                     val uid = myProfile?.userId ?: "uid_$handle"
                     val fp = myProfile?.safetyFingerprint ?: ""
-                    val pk = myProfile?.publicKey ?: "ZEROCHAT_NODE_KEY"
+                    val pk = myProfile?.publicKey ?: "ZEROCHAT_KEY"
                     "zerochat://peer?u=${android.net.Uri.encode(handle)}&uid=${android.net.Uri.encode(uid)}&fp=${android.net.Uri.encode(fp)}&pk=${android.net.Uri.encode(pk)}"
                 }
 
@@ -536,22 +479,16 @@ fun SecurityVaultAndProfileScreen(
                 Spacer(modifier = Modifier.height(10.dp))
 
                 Text(
-                    text = "Açık Anahtar (ECDH P-256 Public Key):",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = CyberCyan
-                )
-                Text(
-                    text = myProfile?.publicKey ?: "ZC-ECDH-P256-GENERATING...",
-                    fontFamily = JetBrainsMonoFontFamily,
-                    style = MaterialTheme.typography.labelSmall,
+                    text = "@${myProfile?.username ?: "kullanici"}",
+                    style = MaterialTheme.typography.titleMedium,
                     color = NeonCyberGreen,
-                    textAlign = TextAlign.Center
+                    fontWeight = FontWeight.Bold
                 )
 
                 Spacer(modifier = Modifier.height(8.dp))
 
                 Text(
-                    text = "60 Haneli Güvenlik Parmak İzi (Safety Number):",
+                    text = "60 Haneli Güvenlik Numaram:",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -576,11 +513,11 @@ fun SecurityVaultAndProfileScreen(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Encrypted .zcvault Backup & Restore Card (PBKDF2 + AES-256-GCM + Physical File Export/Import)
+        // Encrypted .zcvault Backup & Restore Card
         Card(
             shape = RoundedCornerShape(20.dp),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            border = BorderStroke(1.dp, CyberCyan.copy(alpha = 0.6f)),
+            border = BorderStroke(1.dp, CyberCyan.copy(alpha = 0.55f)),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(18.dp)) {
@@ -593,14 +530,14 @@ fun SecurityVaultAndProfileScreen(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Şifreli .zcvault Yedekleme & Fiziksel Dosya",
+                        text = "Şifreli Mesaj Yedekleme (.zcvault)",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
                 }
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Yerel kasadaki $cachedMessagesCount mesajı PBKDF2-HMAC-SHA256 (12.000 iterasyon) + AES-256-GCM ile şifreleyip fiziksel .zcvault dosyası olarak indirin veya geri yükleyin.",
+                    text = "Kasadaki $cachedMessagesCount mesajı belirlediğiniz parola ile şifreleyip cihazınıza dosya olarak indirin veya geri yükleyin.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -608,7 +545,7 @@ fun SecurityVaultAndProfileScreen(
                 OutlinedTextField(
                     value = backupPassword,
                     onValueChange = { backupPassword = it },
-                    label = { Text("Yedekleme Parolası (PBKDF2 Anahtarı)") },
+                    label = { Text("Yedekleme Parolası") },
                     singleLine = true,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -627,7 +564,7 @@ fun SecurityVaultAndProfileScreen(
                 ) {
                     Icon(imageVector = Icons.Default.Backup, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Şifreli .zcvault Yedeği Oluştur", fontWeight = FontWeight.Bold)
+                    Text("Şifreli Yedek Oluştur", fontWeight = FontWeight.Bold)
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
@@ -708,7 +645,7 @@ fun SecurityVaultAndProfileScreen(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = ".zcvault Yedeğini Çöz ve Kasaya Yükle",
+                        text = "Yedeği Çöz ve Geri Yükle",
                         color = NeonCyberGreen,
                         fontWeight = FontWeight.Bold
                     )
@@ -735,7 +672,7 @@ fun SecurityVaultAndProfileScreen(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Küresel @kullanici_adi Dizin Kaydı",
+                        text = "Profil ve @kullanici_adi Bilgilerim",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
@@ -754,7 +691,7 @@ fun SecurityVaultAndProfileScreen(
                 OutlinedTextField(
                     value = displayNameInput,
                     onValueChange = { displayNameInput = it },
-                    label = { Text("Görünen Takma Ad") },
+                    label = { Text("Görünen Ad") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -762,7 +699,7 @@ fun SecurityVaultAndProfileScreen(
                 OutlinedTextField(
                     value = bioInput,
                     onValueChange = { bioInput = it },
-                    label = { Text("Şifreli Düğüm Notu / Durum") },
+                    label = { Text("Hakkımda / Durum Notu") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -779,7 +716,7 @@ fun SecurityVaultAndProfileScreen(
                 ) {
                     Icon(imageVector = Icons.Default.Save, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Kullanıcı Adını ve Açık Anahtarı Güncelle", fontWeight = FontWeight.Bold)
+                    Text("Profil Bilgilerini Güncelle", fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -803,7 +740,7 @@ fun SecurityVaultAndProfileScreen(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Gizli Kasa PIN & Sahte Panik PIN Kodu",
+                        text = "Gizli Kasa PIN & Acil Durum PIN Kodu",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
@@ -811,7 +748,7 @@ fun SecurityVaultAndProfileScreen(
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
                     text = "Durum: " + when {
-                        isPanicModeActive -> "🚨 SAHTE PANİK GİZLEME MODU AKTİF"
+                        isPanicModeActive -> "🚨 GİZLEME MODU AKTİF"
                         isVaultUnlocked -> "🔓 Gizli Kasa Kilidi Açık"
                         else -> "🔒 Gizli Kasa Kilitli"
                     },
@@ -854,7 +791,7 @@ fun SecurityVaultAndProfileScreen(
                     OutlinedTextField(
                         value = panicPinInput,
                         onValueChange = { panicPinInput = it.take(8) },
-                        label = { Text("Sahte Panik PIN") },
+                        label = { Text("Acil Gizleme PIN") },
                         singleLine = true,
                         modifier = Modifier.weight(1f)
                     )
@@ -868,7 +805,7 @@ fun SecurityVaultAndProfileScreen(
                     ),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("PIN Kodlarını Kaydet (SHA-256)", fontWeight = FontWeight.Bold)
+                    Text("PIN Kodlarını Kaydet", fontWeight = FontWeight.Bold)
                 }
 
                 Spacer(modifier = Modifier.height(12.dp))
@@ -880,7 +817,7 @@ fun SecurityVaultAndProfileScreen(
                     OutlinedTextField(
                         value = testPinInput,
                         onValueChange = { testPinInput = it.take(8) },
-                        label = { Text("PIN Test Et (1337 / 9999)") },
+                        label = { Text("PIN Kodu Girin") },
                         singleLine = true,
                         modifier = Modifier.weight(1f)
                     )
@@ -919,7 +856,7 @@ fun SecurityVaultAndProfileScreen(
             )
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                text = "Oturumu Kapat ve Anahtar Belleğini Temizle",
+                text = "Oturumu Kapat",
                 color = BurnCoralRed,
                 fontWeight = FontWeight.Bold
             )

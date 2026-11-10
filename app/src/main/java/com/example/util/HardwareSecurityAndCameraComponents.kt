@@ -882,11 +882,12 @@ fun RealCameraPhotoCaptureDialog(
 }
 
 /**
- * Real-time CameraX video preview box for P2P Encrypted Video Calls.
+ * Real-time CameraX video preview box for P2P Encrypted Video Calls with live frame capture.
  */
 @Composable
 fun LiveVideoCallCameraPreview(
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onFrameCapturedBase64: ((String) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -923,18 +924,47 @@ fun LiveVideoCallCameraPreview(
     DisposableEffect(lifecycleOwner, lensFacing, hasCameraPermission) {
         if (!hasCameraPermission) return@DisposableEffect onDispose {}
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+        val analysisExecutor = Executors.newSingleThreadExecutor()
         val mainExecutor = ContextCompat.getMainExecutor(context)
+        var lastFrameMillis = 0L
+
         val listener = Runnable {
             try {
                 val cameraProvider = cameraProviderFuture.get()
                 val preview = Preview.Builder().build().also {
                     it.setSurfaceProvider(previewView.surfaceProvider)
                 }
+                val imageAnalysis = ImageAnalysis.Builder()
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .build()
+                    .also { analysis ->
+                        analysis.setAnalyzer(analysisExecutor) { imageProxy ->
+                            val now = System.currentTimeMillis()
+                            if (onFrameCapturedBase64 != null && (now - lastFrameMillis) >= 1100L) {
+                                lastFrameMillis = now
+                                try {
+                                    val bmp = imageProxy.toBitmap()
+                                    val targetW = 200
+                                    val targetH = (200f * bmp.height / bmp.width.coerceAtLeast(1)).toInt().coerceIn(150, 280)
+                                    val scaled = Bitmap.createScaledBitmap(bmp, targetW, targetH, true)
+                                    val baos = ByteArrayOutputStream()
+                                    scaled.compress(Bitmap.CompressFormat.JPEG, 44, baos)
+                                    val b64 = "data:image/jpeg;base64," + Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
+                                    mainExecutor.execute {
+                                        onFrameCapturedBase64(b64)
+                                    }
+                                } catch (_: Exception) {
+                                }
+                            }
+                            imageProxy.close()
+                        }
+                    }
+
                 val selector = CameraSelector.Builder()
                     .requireLensFacing(lensFacing)
                     .build()
                 cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(lifecycleOwner, selector, preview)
+                cameraProvider.bindToLifecycle(lifecycleOwner, selector, preview, imageAnalysis)
             } catch (e: Exception) {
                 Log.e("VideoCallCamera", "Failed to bind video call preview", e)
             }
@@ -945,6 +975,7 @@ fun LiveVideoCallCameraPreview(
                 cameraProviderFuture.get().unbindAll()
             } catch (_: Exception) {
             }
+            analysisExecutor.shutdown()
         }
     }
 
@@ -999,7 +1030,7 @@ fun LiveVideoCallCameraPreview(
                         .padding(8.dp)
                 ) {
                     Text(
-                        text = "🟢 CANLI KAMERA • SRTP-256",
+                        text = "🟢 Canlı Kamera",
                         style = MaterialTheme.typography.labelSmall,
                         color = NeonCyberGreen,
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)

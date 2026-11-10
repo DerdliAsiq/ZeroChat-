@@ -180,36 +180,76 @@ object CryptoEngine {
         )
     }
 
+    private fun stripKeyHintPrefix(rawKeyHint: String): String {
+        return when {
+            rawKeyHint.startsWith("REQ_FROM::") || rawKeyHint.startsWith("REQ_REJECTED::") -> {
+                val parts = rawKeyHint.split("::")
+                if (parts.size >= 3) parts.drop(2).joinToString("::") else rawKeyHint
+            }
+            else -> rawKeyHint
+        }
+    }
+
     /**
-     * Decrypts Base64 AES-256-GCM ciphertext back into plaintext on the device, supporting Forward Secrecy ratchet steps.
+     * Decrypts Base64 AES-256-GCM ciphertext back into plaintext on the device, supporting Forward Secrecy ratchet steps
+     * and seamless fallback between request-prefixed and approved room keys.
      */
     fun decrypt(ciphertextB64: String, ivB64: String, roomKeyHint: String, ratchetStep: Int = 0): String {
-        return try {
-            val cipherBytes = Base64.decode(ciphertextB64, Base64.NO_WRAP)
-            val ivBytes = Base64.decode(ivB64, Base64.NO_WRAP)
+        if (ciphertextB64.isBlank()) return ""
+        if (ivB64.isBlank()) {
+            return decryptPreviewPacket(ciphertextB64, roomKeyHint)
+        }
+        val cleanHint = stripKeyHintPrefix(roomKeyHint)
+        val candidateHints = listOf(roomKeyHint, cleanHint).distinct()
+        val candidateSteps = listOf(ratchetStep, 0).distinct()
 
-            val cipher = Cipher.getInstance(AES_MODE)
-            val keySpec = deriveRatchetedRoomKey(roomKeyHint, ratchetStep)
-            val gcmSpec = GCMParameterSpec(GCM_TAG_LENGTH_BITS, ivBytes)
-            cipher.init(Cipher.DECRYPT_MODE, keySpec, gcmSpec)
-
-            val decryptedBytes = cipher.doFinal(cipherBytes)
-            String(decryptedBytes, StandardCharsets.UTF_8)
-        } catch (e: Exception) {
-            if (ratchetStep != 0) {
-                // Try step 0 fallback
-                return try {
+        for (hint in candidateHints) {
+            for (step in candidateSteps) {
+                try {
                     val cipherBytes = Base64.decode(ciphertextB64, Base64.NO_WRAP)
                     val ivBytes = Base64.decode(ivB64, Base64.NO_WRAP)
                     val cipher = Cipher.getInstance(AES_MODE)
-                    cipher.init(Cipher.DECRYPT_MODE, deriveRatchetedRoomKey(roomKeyHint, 0), GCMParameterSpec(GCM_TAG_LENGTH_BITS, ivBytes))
-                    String(cipher.doFinal(cipherBytes), StandardCharsets.UTF_8)
+                    val keySpec = deriveRatchetedRoomKey(hint, step)
+                    val gcmSpec = GCMParameterSpec(GCM_TAG_LENGTH_BITS, ivBytes)
+                    cipher.init(Cipher.DECRYPT_MODE, keySpec, gcmSpec)
+                    val decryptedBytes = cipher.doFinal(cipherBytes)
+                    return String(decryptedBytes, StandardCharsets.UTF_8)
                 } catch (_: Exception) {
-                    "[Şifre Çözülemedi • Anahtar Uyuşmazlığı]"
                 }
             }
-            "[Şifre Çözülemedi • Anahtar Uyuşmazlığı]"
         }
+        return "🔒 Şifreli mesaj"
+    }
+
+    /**
+     * Encrypts a short preview text for chat room list cards, embedding both IV and Ciphertext
+     * so both devices can always decrypt the room's last message preview.
+     */
+    fun encryptPreviewPacket(plaintext: String, roomKeyHint: String): String {
+        val cleanHint = stripKeyHintPrefix(roomKeyHint)
+        val enc = encrypt(plaintext.take(90), cleanHint, 0)
+        return "ZCPREV_V1::${enc.iv}::${enc.ciphertext}"
+    }
+
+    /**
+     * Decrypts a preview packet ("ZCPREV_V1::iv::ciphertext") for chat room list cards.
+     */
+    fun decryptPreviewPacket(previewPacket: String, roomKeyHint: String): String {
+        val trimmed = previewPacket.trim()
+        if (trimmed.isBlank()) return "Yeni sohbet"
+        if (trimmed.startsWith("ZCPREV_V1::")) {
+            val parts = trimmed.split("::")
+            if (parts.size >= 3) {
+                val iv = parts[1]
+                val cipher = parts[2]
+                val cleanHint = stripKeyHintPrefix(roomKeyHint)
+                val out = decrypt(cipher, iv, cleanHint, 0)
+                if (out.isNotBlank() && out != "🔒 Şifreli mesaj") {
+                    return out
+                }
+            }
+        }
+        return "🔒 Şifreli mesaj"
     }
 
     /**
@@ -278,11 +318,48 @@ object CryptoEngine {
     }
 
     fun deriveSafetyEmojis(seed: String): String {
-        val bytes = sha256Bytes(seed)
+        val cleanSeed = stripKeyHintPrefix(seed.trim())
+        val bytes = sha256Bytes("ZEROCHAT_SAFETY_V2::$cleanSeed")
         return (0 until 4).map { idx ->
             val b = bytes[idx].toInt() and 0xFF
             verificationEmojisPool[b % verificationEmojisPool.size]
         }.joinToString("  ")
+    }
+
+    /**
+     * Derives identical 4 verification emojis on both devices by canonically sorting the two participants' usernames.
+     */
+    fun deriveCanonicalPeerSafetyEmojis(
+        usernameA: String?,
+        usernameB: String?,
+        fallbackSeed: String = ""
+    ): String {
+        val cleanA = usernameA.orEmpty().trim().removePrefix("@").lowercase()
+        val cleanB = usernameB.orEmpty().trim().removePrefix("@").lowercase()
+        val canonicalSeed = if (cleanA.isNotBlank() && cleanB.isNotBlank() && cleanA != cleanB) {
+            "PAIR::" + listOf(cleanA, cleanB).sorted().joinToString("::")
+        } else {
+            stripKeyHintPrefix(fallbackSeed.ifBlank { "$cleanA::$cleanB" })
+        }
+        return deriveSafetyEmojis(canonicalSeed)
+    }
+
+    /**
+     * Derives an identical 60-digit safety number on both devices for a pair of usernames.
+     */
+    fun deriveCanonicalSafetyNumber(
+        usernameA: String?,
+        usernameB: String?,
+        fallbackSeed: String = ""
+    ): String {
+        val cleanA = usernameA.orEmpty().trim().removePrefix("@").lowercase()
+        val cleanB = usernameB.orEmpty().trim().removePrefix("@").lowercase()
+        val canonicalSeed = if (cleanA.isNotBlank() && cleanB.isNotBlank() && cleanA != cleanB) {
+            "PAIR::" + listOf(cleanA, cleanB).sorted().joinToString("::")
+        } else {
+            stripKeyHintPrefix(fallbackSeed.ifBlank { "$cleanA::$cleanB" })
+        }
+        return generateIdentityMaterial("CANONICAL", canonicalSeed).second
     }
 
     /**

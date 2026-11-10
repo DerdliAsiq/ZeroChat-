@@ -1,11 +1,15 @@
 package com.example
 
+import android.Manifest
 import android.app.Activity
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.fragment.app.FragmentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -44,7 +48,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.core.content.ContextCompat
 import androidx.credentials.CredentialManager
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
@@ -71,6 +77,7 @@ import com.example.ui.theme.CarbonSurface
 import com.example.ui.theme.MyApplicationTheme
 import com.example.ui.theme.NeonCyberGreen
 import com.example.ui.theme.ObsidianBlack
+import com.example.util.ZeroChatNotificationHelper
 import com.example.util.authenticateWithRealBiometrics
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
@@ -92,6 +99,7 @@ internal fun FirebaseAuth.authStateFlow(): Flow<FirebaseUser?> = callbackFlow {
 class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ZeroChatNotificationHelper.ensureChannels(this)
         enableEdgeToEdge()
         setContent {
             MyApplicationTheme {
@@ -164,6 +172,23 @@ fun ZeroChatAuthenticatedShell(
     val scope = rememberCoroutineScope()
     val credentialManager = remember { CredentialManager.create(context) }
 
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { _ -> }
+
+    LaunchedEffect(Unit) {
+        ZeroChatNotificationHelper.ensureChannels(context)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val hasPerm = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!hasPerm) {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
+
     val myProfile by viewModel.myProfile.collectAsStateWithLifecycle()
     val hardwareKeyStatus by viewModel.hardwareKeyStatus.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
@@ -194,6 +219,28 @@ fun ZeroChatAuthenticatedShell(
     val starredVaultMessages by viewModel.starredVaultMessages.collectAsStateWithLifecycle()
     val exportedVaultBackupText by viewModel.exportedVaultBackupText.collectAsStateWithLifecycle()
     val bannerMessage by viewModel.statusBannerMessage.collectAsStateWithLifecycle()
+    val latestNotificationEvent by viewModel.latestNotificationEvent.collectAsStateWithLifecycle()
+
+    // Trigger real Android System Notifications when incoming messages, requests, or calls arrive
+    LaunchedEffect(latestNotificationEvent) {
+        val evt = latestNotificationEvent ?: return@LaunchedEffect
+        if (evt.isCall) {
+            ZeroChatNotificationHelper.showIncomingCallNotification(
+                context = context,
+                notificationId = evt.id,
+                callerUsername = evt.title.removePrefix("📞 @").removePrefix("@").substringBefore(" "),
+                isVideo = evt.isVideoCall
+            )
+        } else {
+            ZeroChatNotificationHelper.showMessageNotification(
+                context = context,
+                notificationId = evt.id,
+                senderTitle = evt.title,
+                messagePreview = evt.body
+            )
+        }
+        viewModel.consumeNotificationEvent()
+    }
 
     // Automatic Vault Lock when app moves to background (ON_STOP)
     DisposableEffect(lifecycleOwner) {
@@ -238,6 +285,9 @@ fun ZeroChatAuthenticatedShell(
     if (activeCall != null) {
         ActiveP2PCallOverlay(
             callSignal = activeCall!!,
+            currentUserId = currentUserId,
+            myUsername = myProfile?.username,
+            onPushMediaChunk = viewModel::pushActiveCallMediaChunk,
             onEndCall = { viewModel.endActiveCall() }
         )
         return
@@ -357,7 +407,7 @@ fun ZeroChatAuthenticatedShell(
             val directoryPeersList = (directoryState as? UiState.Success)?.data ?: emptyList()
 
             if (activeRoom != null) {
-                val peerHandleInRoom = activeRoom.title.removePrefix("@").trim().lowercase()
+                val peerHandleInRoom = activeRoom.peerHandleFor(myProfile?.username).lowercase()
 
                 ChatConversationScreen(
                     room = activeRoom,
@@ -412,7 +462,7 @@ fun ZeroChatAuthenticatedShell(
                     onSetRoomDefaultTtl = { ttl -> viewModel.setRoomDefaultTtl(activeRoom, ttl) },
                     onStartCall = { callType ->
                         val peerUid = activeRoom.participantUids.firstOrNull { it != currentUserId } ?: currentUserId
-                        val peerHandle = activeRoom.title.removePrefix("@")
+                        val peerHandle = activeRoom.peerHandleFor(myProfile?.username)
                         viewModel.startP2PCall(peerUid, peerHandle, callType)
                     }
                 )

@@ -1,10 +1,12 @@
 package com.example.ui.screens
 
 import android.Manifest
+import android.content.pm.PackageManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -24,6 +26,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CallEnd
@@ -33,7 +36,6 @@ import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.RadioButtonChecked
 import androidx.compose.material.icons.filled.Shield
-import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material.icons.filled.Visibility
@@ -51,22 +53,29 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import androidx.core.content.ContextCompat
 import com.example.R
+import com.example.crypto.CryptoEngine
 import com.example.data.model.CallSignal
 import com.example.data.model.DecryptedStatusItem
 import com.example.data.model.UserProfile
@@ -74,11 +83,13 @@ import com.example.ui.UiState
 import com.example.ui.theme.AmberTimerWarning
 import com.example.ui.theme.BurnCoralRed
 import com.example.ui.theme.CyberCyan
-import com.example.ui.theme.JetBrainsMonoFontFamily
 import com.example.ui.theme.NeonCyberGreen
 import com.example.ui.theme.ObsidianBlack
 import com.example.util.LiveVideoCallCameraPreview
+import com.example.util.VoiceAudioManager
+import com.example.util.decodeBase64DataUriToImageBitmap
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -102,12 +113,12 @@ fun StatusesTabScreen(
         ) {
             Spacer(modifier = Modifier.height(12.dp))
             Text(
-                text = "24 Saatlik Şifreli Durumlar",
+                text = "24 Saatlik Durumlar",
                 style = MaterialTheme.typography.headlineMedium,
                 color = MaterialTheme.colorScheme.onBackground
             )
             Text(
-                text = "AES-256-GCM ile şifrelenen, yanıtlanabilen ve 24 saat sonunda otomatik silinen hikayeler.",
+                text = "Uçtan uca şifrelenen, yanıtlanabilen ve 24 saat sonunda otomatik silinen durum paylaşımları.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -117,7 +128,7 @@ fun StatusesTabScreen(
             when (statusesState) {
                 is UiState.Loading -> {
                     Text(
-                        text = "Şifreli durum akışı çözülüyor...",
+                        text = "Durum akışı yükleniyor...",
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
@@ -148,12 +159,12 @@ fun StatusesTabScreen(
                                 )
                                 Spacer(modifier = Modifier.height(10.dp))
                                 Text(
-                                    text = "Aktif 24 Saatlik Durum Yok",
+                                    text = "Aktif Durum Paylaşımı Yok",
                                     style = MaterialTheme.typography.titleMedium
                                 )
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
-                                    text = "İlk şifreli durum güncellemesini paylaşarak ağdaki diğer düğümlerle paylaşım yapın.",
+                                    text = "İlk durum güncellemesini paylaşarak kişilerinizle güvenli hikaye paylaşımı yapın.",
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     textAlign = TextAlign.Center
@@ -243,7 +254,7 @@ private fun EncryptedStatusCard(
     Card(
         shape = RoundedCornerShape(18.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = BorderStroke(1.5.dp, NeonCyberGreen.copy(alpha = 0.6f)),
+        border = BorderStroke(1.dp, NeonCyberGreen.copy(alpha = 0.45f)),
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
@@ -258,7 +269,7 @@ private fun EncryptedStatusCard(
                     Surface(
                         shape = CircleShape,
                         color = MaterialTheme.colorScheme.primaryContainer,
-                        border = BorderStroke(2.dp, NeonCyberGreen),
+                        border = BorderStroke(1.5.dp, NeonCyberGreen),
                         modifier = Modifier.size(42.dp)
                     ) {
                         Box(contentAlignment = Alignment.Center) {
@@ -278,7 +289,7 @@ private fun EncryptedStatusCard(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "${hoursRemaining} saat sonra otomatik imha • Yanıtlamak için dokunun",
+                            text = "${hoursRemaining} saat sonra silinir • Yanıtlamak için dokunun",
                             style = MaterialTheme.typography.labelSmall,
                             color = AmberTimerWarning
                         )
@@ -308,15 +319,6 @@ private fun EncryptedStatusCard(
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurface
             )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = "AES-256-GCM Zarfı: ${status.ciphertext.take(28)}...",
-                fontFamily = JetBrainsMonoFontFamily,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
         }
     }
 }
@@ -337,7 +339,7 @@ private fun CreateStatusDialog(
         ) {
             Column(modifier = Modifier.padding(20.dp)) {
                 Text(
-                    text = "24 Saatlik Şifreli Durum Paylaş",
+                    text = "24 Saatlik Durum Paylaş",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
@@ -345,7 +347,7 @@ private fun CreateStatusDialog(
                 OutlinedTextField(
                     value = statusText,
                     onValueChange = { statusText = it },
-                    label = { Text("Şifrelenecek Durum Metni") },
+                    label = { Text("Durum Metni") },
                     maxLines = 4,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -386,7 +388,7 @@ private fun CreateStatusDialog(
                         ),
                         modifier = Modifier.testTag("publish_status_button")
                     ) {
-                        Text("Şifrele ve Paylaş", fontWeight = FontWeight.Bold)
+                        Text("Paylaş", fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -458,7 +460,7 @@ private fun StatusStoryViewerDialog(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(14.dp))
+                Spacer(modifier = Modifier.height(18.dp))
 
                 Text(
                     text = status.decryptedContent,
@@ -467,7 +469,7 @@ private fun StatusStoryViewerDialog(
                     textAlign = TextAlign.Center
                 )
 
-                Spacer(modifier = Modifier.height(14.dp))
+                Spacer(modifier = Modifier.height(16.dp))
 
                 Surface(
                     shape = RoundedCornerShape(12.dp),
@@ -476,16 +478,9 @@ private fun StatusStoryViewerDialog(
                 ) {
                     Column(modifier = Modifier.padding(10.dp)) {
                         Text(
-                            text = "Görüntüleyen Düğümler: $viewerHandles",
+                            text = "Görüntüleyen Kişiler: $viewerHandles",
                             style = MaterialTheme.typography.labelSmall,
                             color = NeonCyberGreen
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "AES-256-GCM: ${status.ciphertext.take(36)}... (IV: ${status.iv})",
-                            fontFamily = JetBrainsMonoFontFamily,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
@@ -520,7 +515,7 @@ private fun StatusStoryViewerDialog(
                 OutlinedTextField(
                     value = replyText,
                     onValueChange = { replyText = it },
-                    label = { Text("@${status.authorUsername} durumuna şifreli yanıt yaz...") },
+                    label = { Text("@${status.authorUsername} durumuna yanıt yaz...") },
                     singleLine = true,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -553,7 +548,7 @@ private fun StatusStoryViewerDialog(
                             .weight(1f)
                             .testTag("send_status_reply_button")
                     ) {
-                        Text("Şifreli Yanıtla", fontWeight = FontWeight.Bold)
+                        Text("Yanıt Gönder", fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -576,12 +571,12 @@ fun CallsTabScreen(
     ) {
         Spacer(modifier = Modifier.height(12.dp))
         Text(
-            text = "Uçtan Uca Şifreli P2P Aramalar",
+            text = "Uçtan Uca Şifreli Aramalar",
             style = MaterialTheme.typography.headlineMedium,
             color = MaterialTheme.colorScheme.onBackground
         )
         Text(
-            text = "SRTP / WebRTC P2P sinyal katmanı ve 4-emoji anahtar doğrulamalı sesli/görüntülü aramalar.",
+            text = "4-emoji güvenlik doğrulamalı sesli ve görüntülü aramalar.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -590,16 +585,15 @@ fun CallsTabScreen(
 
         var directDialHandle by remember { mutableStateOf("") }
 
-        // Direct @username P2P Encrypted Dialer Card
         Card(
             shape = RoundedCornerShape(16.dp),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            border = BorderStroke(1.dp, NeonCyberGreen.copy(alpha = 0.6f)),
+            border = BorderStroke(1.dp, NeonCyberGreen.copy(alpha = 0.5f)),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(14.dp)) {
                 Text(
-                    text = "Doğrudan @kullanici_adi İle Şifreli P2P Arama",
+                    text = "@kullanici_adi İle Hızlı Arama",
                     style = MaterialTheme.typography.titleSmall,
                     color = NeonCyberGreen,
                     fontWeight = FontWeight.Bold
@@ -667,7 +661,7 @@ fun CallsTabScreen(
 
         if (peers.isNotEmpty()) {
             Text(
-                text = "Hızlı Şifreli Arama Başlat:",
+                text = "Rehberden Hızlı Ara:",
                 style = MaterialTheme.typography.labelSmall,
                 color = CyberCyan
             )
@@ -723,7 +717,7 @@ fun CallsTabScreen(
         }
 
         Text(
-            text = "Şifreli Sinyal Geçmişi:",
+            text = "Son Aramalar:",
             style = MaterialTheme.typography.labelSmall,
             color = NeonCyberGreen
         )
@@ -732,7 +726,7 @@ fun CallsTabScreen(
         when (callsState) {
             is UiState.Loading -> {
                 Text(
-                    text = "Arama sinyalleri yükleniyor...",
+                    text = "Arama geçmişi yükleniyor...",
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
@@ -763,11 +757,11 @@ fun CallsTabScreen(
                             )
                             Spacer(modifier = Modifier.height(8.dp))
                             Text(
-                                text = "Henüz Şifreli Arama Kaydı Yok",
+                                text = "Henüz Arama Kaydı Yok",
                                 style = MaterialTheme.typography.titleMedium
                             )
                             Text(
-                                text = "Bir sohbetin içinden veya yukarıdaki kişi listesinden sesli/görüntülü P2P arama başlatabilirsiniz.",
+                                text = "Bir sohbetin içinden veya yukarıdaki kişi listesinden sesli/görüntülü arama başlatabilirsiniz.",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 textAlign = TextAlign.Center
@@ -783,6 +777,18 @@ fun CallsTabScreen(
                             val dateStr = remember(call.createdAt) {
                                 val d = call.createdAt?.toDate() ?: Date()
                                 SimpleDateFormat("dd MMM HH:mm", Locale.getDefault()).format(d)
+                            }
+                            val canonicalEmojis = remember(call.callerUsername, call.calleeUsername, call.safetyEmojis) {
+                                CryptoEngine.deriveCanonicalPeerSafetyEmojis(
+                                    usernameA = call.callerUsername,
+                                    usernameB = call.calleeUsername,
+                                    fallbackSeed = call.safetyEmojis
+                                )
+                            }
+                            val statusText = when (call.status) {
+                                "CONNECTED" -> "Bağlandı"
+                                "RINGING" -> "Çalıyor"
+                                else -> "Tamamlandı"
                             }
                             Card(
                                 shape = RoundedCornerShape(16.dp),
@@ -807,7 +813,7 @@ fun CallsTabScreen(
                                             fontWeight = FontWeight.Bold
                                         )
                                         Text(
-                                            text = "Doğrulama Emojileri: ${call.safetyEmojis} • $dateStr",
+                                            text = "$statusText • Doğrulama: $canonicalEmojis • $dateStr",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
@@ -825,26 +831,110 @@ fun CallsTabScreen(
 @Composable
 fun ActiveP2PCallOverlay(
     callSignal: CallSignal,
+    currentUserId: String = "",
+    myUsername: String? = null,
+    onPushMediaChunk: (String?, String?) -> Unit = { _, _ -> },
     onEndCall: () -> Unit
 ) {
     BackHandler(onBack = onEndCall)
+
+    val context = LocalContext.current
+    val voiceAudioManager = remember { VoiceAudioManager(context) }
 
     var isMuted by remember { mutableStateOf(false) }
     var isVideoEnabled by remember { mutableStateOf(callSignal.callType == "VIDEO") }
     var isSpeakerOn by remember { mutableStateOf(true) }
     var elapsedSeconds by remember { mutableIntStateOf(0) }
+    var lastPlayedMediaSeq by remember { mutableLongStateOf(0L) }
+
+    val isCaller = remember(callSignal.callerId, callSignal.callerUsername, currentUserId, myUsername) {
+        callSignal.callerId == currentUserId ||
+            (!myUsername.isNullOrBlank() && callSignal.callerUsername.equals(myUsername, ignoreCase = true))
+    }
+
+    val remotePeerUsername = remember(callSignal.callerUsername, callSignal.calleeUsername, isCaller) {
+        if (isCaller) callSignal.calleeUsername else callSignal.callerUsername
+    }
+
+    val canonicalSafetyEmojis = remember(callSignal.callerUsername, callSignal.calleeUsername, callSignal.safetyEmojis) {
+        CryptoEngine.deriveCanonicalPeerSafetyEmojis(
+            usernameA = callSignal.callerUsername,
+            usernameB = callSignal.calleeUsername,
+            fallbackSeed = callSignal.safetyEmojis
+        )
+    }
+
+    val remoteAudioB64 = if (isCaller) callSignal.calleeAudioB64 else callSignal.callerAudioB64
+    val remoteVideoB64 = if (isCaller) callSignal.calleeVideoB64 else callSignal.callerVideoB64
+    val remoteVideoBitmap = remember(remoteVideoB64) {
+        if (remoteVideoB64.isNotBlank()) decodeBase64DataUriToImageBitmap(remoteVideoB64) else null
+    }
 
     val permissionsLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { _ -> }
 
+    DisposableEffect(Unit) {
+        voiceAudioManager.setSpeakerphoneEnabled(true)
+        onDispose {
+            voiceAudioManager.stopPlayback()
+            voiceAudioManager.setSpeakerphoneEnabled(false)
+        }
+    }
+
+    LaunchedEffect(isSpeakerOn) {
+        voiceAudioManager.setSpeakerphoneEnabled(isSpeakerOn)
+    }
+
     LaunchedEffect(Unit) {
         permissionsLauncher.launch(
             arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA)
         )
-        while (true) {
-            delay(1000L)
-            elapsedSeconds++
+    }
+
+    // Start call timer ONLY when call status is CONNECTED
+    LaunchedEffect(callSignal.status) {
+        if (callSignal.status == "CONNECTED") {
+            while (isActive) {
+                delay(1000L)
+                elapsedSeconds++
+            }
+        } else {
+            elapsedSeconds = 0
+        }
+    }
+
+    // Play incoming remote audio chunks automatically when CONNECTED
+    LaunchedEffect(callSignal.mediaSeq, remoteAudioB64, callSignal.status) {
+        if (callSignal.status == "CONNECTED" &&
+            remoteAudioB64.isNotBlank() &&
+            callSignal.mediaSeq > lastPlayedMediaSeq
+        ) {
+            lastPlayedMediaSeq = callSignal.mediaSeq
+            voiceAudioManager.playBase64Audio(
+                audioBase64 = remoteAudioB64,
+                onCompletion = {}
+            )
+        }
+    }
+
+    // Record & push live microphone audio chunks while CONNECTED and not muted
+    LaunchedEffect(callSignal.status, isMuted) {
+        if (callSignal.status == "CONNECTED" && !isMuted) {
+            while (isActive && !isMuted && callSignal.status == "CONNECTED") {
+                val hasMicPerm = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+                if (hasMicPerm) {
+                    val chunkB64 = voiceAudioManager.recordShortCallAudioChunk(1350L)
+                    if (chunkB64.isNotBlank()) {
+                        onPushMediaChunk(chunkB64, null)
+                    }
+                } else {
+                    delay(1500L)
+                }
+            }
         }
     }
 
@@ -861,19 +951,19 @@ fun ActiveP2PCallOverlay(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(24.dp),
+                .padding(20.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.SpaceBetween
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Spacer(modifier = Modifier.height(20.dp))
+                Spacer(modifier = Modifier.height(14.dp))
                 Surface(
                     shape = RoundedCornerShape(16.dp),
                     color = MaterialTheme.colorScheme.primaryContainer,
                     border = BorderStroke(1.dp, NeonCyberGreen)
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
@@ -884,79 +974,129 @@ fun ActiveP2PCallOverlay(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "UÇTAN UCA ŞİFRELİ P2P TÜNEL • SRTP-256",
+                            text = "Uçtan Uca Şifreli Arama",
                             style = MaterialTheme.typography.labelSmall,
-                            color = NeonCyberGreen
+                            color = NeonCyberGreen,
+                            fontWeight = FontWeight.Bold
                         )
                     }
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
                 Text(
-                    text = "@${callSignal.calleeUsername}",
-                    style = MaterialTheme.typography.displayLarge,
-                    color = MaterialTheme.colorScheme.onBackground
+                    text = "@$remotePeerUsername",
+                    style = MaterialTheme.typography.headlineLarge,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    fontWeight = FontWeight.Bold
                 )
 
-                Spacer(modifier = Modifier.height(6.dp))
+                Spacer(modifier = Modifier.height(4.dp))
 
                 Text(
-                    text = "$timerFormatted • Doğrudan Eşler Arası (P2P) Bağlantı",
+                    text = if (callSignal.status == "CONNECTED") {
+                        "$timerFormatted • Bağlandı (Canlı Ses Aktif)"
+                    } else {
+                        "Aranıyor... Karşı tarafın yanıtlaması bekleniyor"
+                    },
                     style = MaterialTheme.typography.bodyMedium,
-                    color = CyberCyan
+                    color = if (callSignal.status == "CONNECTED") NeonCyberGreen else AmberTimerWarning
                 )
             }
 
-            // Center Cryptographic Emoji Verification & Audio/Video Matrix
+            // Center Verification Emojis & Live Audio/Video Area
             Card(
                 shape = RoundedCornerShape(24.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                border = BorderStroke(1.5.dp, NeonCyberGreen.copy(alpha = 0.6f)),
+                border = BorderStroke(1.dp, NeonCyberGreen.copy(alpha = 0.5f)),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(
-                    modifier = Modifier.padding(24.dp),
+                    modifier = Modifier.padding(18.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Shield,
-                        contentDescription = null,
-                        tint = NeonCyberGreen,
-                        modifier = Modifier.size(44.dp)
-                    )
-                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Shield,
+                            contentDescription = null,
+                            tint = NeonCyberGreen,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Güvenlik Emojileri:  $canonicalSafetyEmojis",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onBackground,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "Anahtar Doğrulama Emojileri",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = callSignal.safetyEmojis,
-                        style = MaterialTheme.typography.displayLarge
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "Karşı taraftaki ekranda da aynı 4 emoji görünüyorsa aramanız ortadaki adam (MITM) saldırılarına karşı %100 güvendedir.",
-                        style = MaterialTheme.typography.bodyMedium,
+                        text = "Her iki ekranda da aynı 4 emoji görünüyorsa aramanız tamamen güvendedir.",
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = TextAlign.Center
                     )
-                    Spacer(modifier = Modifier.height(14.dp))
-                    if (isVideoEnabled) {
-                        LiveVideoCallCameraPreview(
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    if (isVideoEnabled || remoteVideoBitmap != null) {
+                        Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(220.dp)
-                        )
+                                .height(250.dp)
+                                .clip(RoundedCornerShape(18.dp))
+                                .background(ObsidianBlack)
+                        ) {
+                            if (remoteVideoBitmap != null) {
+                                Image(
+                                    bitmap = remoteVideoBitmap,
+                                    contentDescription = "Karşı Tarafın Görüntüsü",
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                                if (isVideoEnabled) {
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.BottomEnd)
+                                            .padding(10.dp)
+                                            .size(width = 100.dp, height = 135.dp)
+                                    ) {
+                                        LiveVideoCallCameraPreview(
+                                            modifier = Modifier.fillMaxSize(),
+                                            onFrameCapturedBase64 = { frameB64 ->
+                                                if (callSignal.status == "CONNECTED") {
+                                                    onPushMediaChunk(null, frameB64)
+                                                }
+                                            }
+                                        )
+                                    }
+                                }
+                            } else if (isVideoEnabled) {
+                                LiveVideoCallCameraPreview(
+                                    modifier = Modifier.fillMaxSize(),
+                                    onFrameCapturedBase64 = { frameB64 ->
+                                        if (callSignal.status == "CONNECTED") {
+                                            onPushMediaChunk(null, frameB64)
+                                        }
+                                    }
+                                )
+                            }
+                        }
                         Spacer(modifier = Modifier.height(10.dp))
                     }
+
                     Text(
-                        text = "Şifreli Ses Dalga Formu:  ▃▅▇█▆▄▂▅▇█▆▄▃▅▇",
-                        fontFamily = JetBrainsMonoFontFamily,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = NeonCyberGreen
+                        text = when {
+                            callSignal.status != "CONNECTED" -> "🔔 Çağrı sinyali gönderildi, yanıt bekleniyor..."
+                            isMuted -> "🔇 Mikrofonunuz kapalı"
+                            else -> "🎙️ Canlı ses aktarımı aktif  ▃▅▇█▆▄▂▅▇"
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (isMuted) AmberTimerWarning else NeonCyberGreen
                     )
                 }
             }
@@ -965,7 +1105,7 @@ fun ActiveP2PCallOverlay(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(bottom = 24.dp),
+                    .padding(bottom = 20.dp),
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -1043,6 +1183,14 @@ fun IncomingCallRingingOverlay(
 ) {
     BackHandler(onBack = onDeclineCall)
 
+    val canonicalSafetyEmojis = remember(callSignal.callerUsername, callSignal.calleeUsername, callSignal.safetyEmojis) {
+        CryptoEngine.deriveCanonicalPeerSafetyEmojis(
+            usernameA = callSignal.callerUsername,
+            usernameB = callSignal.calleeUsername,
+            fallbackSeed = callSignal.safetyEmojis
+        )
+    }
+
     Surface(
         color = ObsidianBlack,
         modifier = Modifier.fillMaxSize()
@@ -1074,9 +1222,9 @@ fun IncomingCallRingingOverlay(
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
                             text = if (callSignal.callType == "VIDEO") {
-                                "GELEN ŞİFRELİ GÖRÜNTÜLÜ P2P ARAMA..."
+                                "GELEN GÖRÜNTÜLÜ ARAMA..."
                             } else {
-                                "GELEN ŞİFRELİ SESLİ P2P ARAMA..."
+                                "GELEN SESLİ ARAMA..."
                             },
                             style = MaterialTheme.typography.labelLarge,
                             color = CyberCyan
@@ -1113,7 +1261,7 @@ fun IncomingCallRingingOverlay(
                 Spacer(modifier = Modifier.height(6.dp))
 
                 Text(
-                    text = "Sıfır-Bilgi ECDH P-256 + SRTP El Sıkışması Hazır",
+                    text = "Uçtan Uca Şifreli Arama",
                     style = MaterialTheme.typography.bodyMedium,
                     color = NeonCyberGreen
                 )
@@ -1130,18 +1278,18 @@ fun IncomingCallRingingOverlay(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
-                        text = "Ön Doğrulama Emojileri (Safety Emojis)",
+                        text = "Güvenlik Doğrulama Emojileri",
                         style = MaterialTheme.typography.labelSmall,
                         color = CyberCyan
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = callSignal.safetyEmojis,
+                        text = canonicalSafetyEmojis,
                         style = MaterialTheme.typography.displayLarge
                     )
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "Aramayı yanıtladığınızda uçtan uca şifreli P2P medya tüneli doğrudan cihazlar arasında kurulacaktır.",
+                        text = "Aramayı yanıtladığınızda uçtan uca şifreli ses/görüntü bağlantısı kurulacaktır.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = TextAlign.Center
@@ -1196,7 +1344,7 @@ fun IncomingCallRingingOverlay(
                     }
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "Şifreli Yanıtla",
+                        text = "Yanıtla",
                         style = MaterialTheme.typography.labelLarge,
                         color = NeonCyberGreen,
                         fontWeight = FontWeight.Bold

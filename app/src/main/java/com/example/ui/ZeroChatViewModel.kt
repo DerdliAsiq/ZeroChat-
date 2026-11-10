@@ -90,6 +90,25 @@ class ZeroChatViewModel(
     private val _statusBannerMessage = MutableStateFlow<String?>(null)
     val statusBannerMessage: StateFlow<String?> = _statusBannerMessage.asStateFlow()
 
+    data class SystemNotificationEvent(
+        val id: Int,
+        val title: String,
+        val body: String,
+        val isCall: Boolean = false,
+        val isVideoCall: Boolean = false
+    )
+
+    private val _latestNotificationEvent = MutableStateFlow<SystemNotificationEvent?>(null)
+    val latestNotificationEvent: StateFlow<SystemNotificationEvent?> = _latestNotificationEvent.asStateFlow()
+
+    fun consumeNotificationEvent() {
+        _latestNotificationEvent.value = null
+    }
+
+    private val notifiedRoomTimestamps = mutableMapOf<String, Long>()
+    private val notifiedCallIds = mutableSetOf<String>()
+    private var initialRoomsSnapshotLoaded = false
+
     private val _clockTickMillis = MutableStateFlow(System.currentTimeMillis())
 
     private val _rawRoomEnvelopes = MutableStateFlow<List<EncryptedEnvelope>>(emptyList())
@@ -217,6 +236,41 @@ class ZeroChatViewModel(
         if (panic) {
             UiState.Success(emptyList<ChatRoom>()) as UiState<List<ChatRoom>>
         } else {
+            val myHandle = _myProfile.value?.username?.trim()?.lowercase(Locale.ROOT).orEmpty()
+            val nowMs = System.currentTimeMillis()
+            if (!initialRoomsSnapshotLoaded) {
+                rooms.forEach { r ->
+                    val ts = (r.updatedAt ?: r.createdAt)?.toDate()?.time ?: nowMs
+                    notifiedRoomTimestamps[r.id] = ts
+                }
+                initialRoomsSnapshotLoaded = true
+            } else {
+                rooms.forEach { r ->
+                    val ts = (r.updatedAt ?: r.createdAt)?.toDate()?.time ?: 0L
+                    val prevTs = notifiedRoomTimestamps[r.id] ?: 0L
+                    if (ts > prevTs) {
+                        notifiedRoomTimestamps[r.id] = ts
+                        val senderLower = r.lastSenderName.trim().removePrefix("@").lowercase(Locale.ROOT)
+                        val isFromOther = senderLower.isNotBlank() && senderLower != myHandle
+                        val isNotCurrentlyOpen = _selectedRoom.value?.id != r.id
+                        if (isFromOther && isNotCurrentlyOpen && (nowMs - ts) < 120_000L) {
+                            val previewText = CryptoEngine.decryptPreviewPacket(r.lastCipherPreview, r.roomKeyHint)
+                            val titleText = if (r.isPendingRequest) {
+                                "Yeni Sohbet İsteği: @${r.lastSenderName.removePrefix("@")}"
+                            } else {
+                                "@${r.lastSenderName.removePrefix("@")}"
+                            }
+                            _latestNotificationEvent.value = SystemNotificationEvent(
+                                id = r.id.hashCode(),
+                                title = titleText,
+                                body = previewText,
+                                isCall = false
+                            )
+                        }
+                    }
+                }
+            }
+
             val currentSel = _selectedRoom.value
             if (currentSel != null) {
                 rooms.firstOrNull { it.id == currentSel.id }?.let { _selectedRoom.value = it }
@@ -235,7 +289,7 @@ class ZeroChatViewModel(
             if (firestoreError == null && error is CancellationException) throw error
             val rootError = firestoreError ?: error
             Log.w(TAG, "Error observing user rooms", rootError)
-            emit(UiState.Error(rootError.message ?: "Şifreli odalar yüklenemedi"))
+            emit(UiState.Error(rootError.message ?: "Sohbetler yüklenemedi"))
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
 
@@ -414,6 +468,19 @@ class ZeroChatViewModel(
             if (panic) {
                 UiState.Success(emptyList<CallSignal>()) as UiState<List<CallSignal>>
             } else {
+                // Keep _activeCall synchronized in real time with remote accept / media / end updates
+                val currentActive = _activeCall.value
+                if (currentActive != null) {
+                    val liveMatch = calls.firstOrNull { it.id == currentActive.id }
+                    if (liveMatch != null) {
+                        if (liveMatch.status == "ENDED") {
+                            _activeCall.value = null
+                            _statusBannerMessage.value = "Arama sonlandırıldı"
+                        } else {
+                            _activeCall.value = liveMatch
+                        }
+                    }
+                }
                 UiState.Success(calls) as UiState<List<CallSignal>>
             }
         }
@@ -436,14 +503,29 @@ class ZeroChatViewModel(
         if (panic || active != null) return@combine null
         val list = (callsState as? UiState.Success)?.data ?: emptyList()
         val now = System.currentTimeMillis()
-        list.firstOrNull { signal ->
+        val ringing = list.firstOrNull { signal ->
             val createdMs = (signal.createdAt ?: signal.updatedAt)?.toDate()?.time ?: now
             signal.status == "RINGING" &&
                 signal.callerId != currentUserId &&
                 !dismissedCallIdsInSession.contains(signal.id) &&
                 (now - createdMs) < 90_000L
         }
+        if (ringing != null && notifiedCallIds.add(ringing.id)) {
+            _latestNotificationEvent.value = SystemNotificationEvent(
+                id = ringing.id.hashCode(),
+                title = ringTitleFor(ringing),
+                body = "Yanıtlamak için uygulamayı açın",
+                isCall = true,
+                isVideoCall = ringing.callType == "VIDEO"
+            )
+        }
+        ringing
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), null)
+
+    private fun ringTitleFor(signal: CallSignal): String {
+        val typeText = if (signal.callType == "VIDEO") "Görüntülü Arama" else "Sesli Arama"
+        return "@${signal.callerUsername.removePrefix("@")} • $typeText"
+    }
 
     init {
         bootstrapIdentityIfNeeded(initialEmailHint)
@@ -1555,6 +1637,8 @@ class ZeroChatViewModel(
                 initialStatus = "RINGING"
             ).onSuccess { signal ->
                 _activeCall.value = signal
+            }.onFailure { err ->
+                _statusBannerMessage.value = "Arama başlatılamadı: ${err.localizedMessage}"
             }
         }
     }
@@ -1569,6 +1653,22 @@ class ZeroChatViewModel(
         }
     }
 
+    fun pushActiveCallMediaChunk(audioB64: String? = null, videoB64: String? = null) {
+        val current = _activeCall.value ?: return
+        if (current.status != "CONNECTED" || current.id.isBlank()) return
+        val isCaller = current.callerId == currentUserId
+        val nextSeq = current.mediaSeq + 1L
+        viewModelScope.launch {
+            repository.pushCallMediaChunk(
+                callId = current.id,
+                isCaller = isCaller,
+                audioB64 = audioB64,
+                videoB64 = videoB64,
+                nextSeq = nextSeq
+            )
+        }
+    }
+
     fun declineIncomingCall(call: CallSignal) {
         dismissedCallIdsInSession.add(call.id)
         if (call.id.isNotBlank()) {
@@ -1576,7 +1676,7 @@ class ZeroChatViewModel(
                 repository.endEncryptedCall(call.id)
             }
         }
-        _statusBannerMessage.value = "@${call.callerUsername} gelen şifreli araması reddedildi"
+        _statusBannerMessage.value = "@${call.callerUsername} gelen araması reddedildi"
     }
 
     fun endActiveCall() {
@@ -1603,11 +1703,15 @@ class ZeroChatViewModel(
 
     fun verifyActiveRoomIdentity() {
         val room = _selectedRoom.value ?: return
-        val handle = room.title.removePrefix("@").trim().lowercase(Locale.ROOT)
+        val handle = room.peerHandleFor(_myProfile.value?.username).trim().lowercase(Locale.ROOT)
         val peers = (directoryUsersState.value as? UiState.Success)?.data ?: emptyList()
         val matchedPeer = peers.firstOrNull { it.username.lowercase(Locale.ROOT) == handle }
         val pubKey = matchedPeer?.publicKey ?: room.roomKeyHint
-        val safetyFp = matchedPeer?.safetyFingerprint ?: CryptoEngine.generateIdentityMaterial(room.id, room.roomKeyHint).second
+        val safetyFp = matchedPeer?.safetyFingerprint ?: CryptoEngine.deriveCanonicalSafetyNumber(
+            usernameA = _myProfile.value?.username,
+            usernameB = handle,
+            fallbackSeed = room.effectiveRoomKeyHint
+        )
 
         viewModelScope.launch {
             vaultDao.saveVerifiedPeer(
@@ -1618,7 +1722,7 @@ class ZeroChatViewModel(
                     verifiedSafetyFingerprint = safetyFp
                 )
             )
-            _statusBannerMessage.value = "🛡️ @${room.title.removePrefix("@")} düğümü 'Doğrulanmış (Verified)' olarak mühürlendi!"
+            _statusBannerMessage.value = "🛡️ @$handle güvenli kişi olarak doğrulandı!"
         }
     }
 
@@ -1639,7 +1743,7 @@ class ZeroChatViewModel(
                     scheduledAtMillis = targetMillis
                 )
             )
-            _statusBannerMessage.value = "⏳ Mesaj ${delaySeconds} sn sonra otomatik şifrelenip gönderilmek üzere zamanlandı"
+            _statusBannerMessage.value = "⏳ Mesaj ${delaySeconds} sn sonra gönderilmek üzere zamanlandı"
         }
     }
 
@@ -1658,10 +1762,10 @@ class ZeroChatViewModel(
             repository.nukeRoomHistory(room, senderName)
                 .onSuccess { count ->
                     _rawRoomEnvelopes.value = emptyList()
-                    _statusBannerMessage.value = "☢️ Oda geçmişi imha edildi ($count bulut zarfı + yerel kasa sıfırlandı)"
+                    _statusBannerMessage.value = "🧹 Sohbet geçmişi temizlendi ($count mesaj silindi)"
                 }
                 .onFailure { err ->
-                    _statusBannerMessage.value = "Oda imha edilemedi: ${err.localizedMessage}"
+                    _statusBannerMessage.value = "Sohbet geçmişi temizlenemedi: ${err.localizedMessage}"
                 }
         }
     }
