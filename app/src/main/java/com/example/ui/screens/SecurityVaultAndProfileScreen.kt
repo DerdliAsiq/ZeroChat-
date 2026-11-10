@@ -521,8 +521,16 @@ fun SecurityVaultAndProfileScreen(
 
                 Spacer(modifier = Modifier.height(12.dp))
 
+                val personalQrUri = remember(myProfile) {
+                    val handle = myProfile?.username ?: "zerochat_node"
+                    val uid = myProfile?.userId ?: "uid_$handle"
+                    val fp = myProfile?.safetyFingerprint ?: ""
+                    val pk = myProfile?.publicKey ?: "ZEROCHAT_NODE_KEY"
+                    "zerochat://peer?u=${android.net.Uri.encode(handle)}&uid=${android.net.Uri.encode(uid)}&fp=${android.net.Uri.encode(fp)}&pk=${android.net.Uri.encode(pk)}"
+                }
+
                 CyberQrMatrix(
-                    seedData = myProfile?.publicKey ?: "ZEROCHAT_NODE_KEY"
+                    seedData = personalQrUri
                 )
 
                 Spacer(modifier = Modifier.height(10.dp))

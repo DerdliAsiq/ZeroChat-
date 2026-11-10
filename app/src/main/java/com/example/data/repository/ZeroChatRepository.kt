@@ -379,8 +379,7 @@ class ZeroChatRepository(
     suspend fun sendDirectConnectionRequest(
         myProfile: UserProfile,
         peerProfile: UserProfile,
-        introNote: String = "",
-        simulatedIncomingFromPeer: Boolean = false
+        introNote: String = ""
     ): Result<ChatRoom> = runCatching {
         val uid = requireUserId()
         val resolvedPeer = resolveRealPeerFromCloudIfAvailable(peerProfile)
@@ -389,11 +388,7 @@ class ZeroChatRepository(
         deletedRoomIdsFlow.value = deletedRoomIdsFlow.value - deterministicRoomId
 
         val baseKeyHint = CryptoEngine.computeDirectRoomKeyHint(uid, resolvedPeer.userId)
-        val requesterHandle = if (simulatedIncomingFromPeer) {
-            resolvedPeer.username.ifBlank { "siber_dugum" }
-        } else {
-            myProfile.username.ifBlank { "zero_${uid.take(5)}" }
-        }
+        val requesterHandle = myProfile.username.ifBlank { "zero_${uid.take(5)}" }
         val pendingKeyHint = "REQ_FROM::${requesterHandle}::$baseKeyHint"
         val previewPlaintext = introNote.trim().ifBlank {
             "🤝 @$requesterHandle şifreli iletişim ve takip isteği gönderdi (Onay Bekleniyor)"
@@ -418,7 +413,7 @@ class ZeroChatRepository(
 
         if (isLocalNodeMode()) {
             val existingLocal = localRoomsFlow.value.firstOrNull { it.id == deterministicRoomId }
-            if (existingLocal != null && existingLocal.isApprovedConnection && !simulatedIncomingFromPeer) {
+            if (existingLocal != null && existingLocal.isApprovedConnection) {
                 return@runCatching existingLocal
             }
             localRoomsFlow.value = localRoomsFlow.value.filterNot { it.id == deterministicRoomId } + localRoomObj
@@ -437,7 +432,7 @@ class ZeroChatRepository(
             DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
         )
 
-        if (existingRoom != null && existingRoom.isApprovedConnection && !simulatedIncomingFromPeer) {
+        if (existingRoom != null && existingRoom.isApprovedConnection) {
             return@runCatching existingRoom
         }
 
@@ -818,7 +813,7 @@ class ZeroChatRepository(
             iv = encrypted.iv,
             signatureHash = encrypted.signatureHash,
             messageType = messageType,
-            encryptedMeta = encryptedMeta.take(8000),
+            encryptedMeta = encryptedMeta.take(260000),
             reactionsSummary = "",
             ttlSeconds = ttlSeconds,
             createdAt = Timestamp.now(),
@@ -847,7 +842,7 @@ class ZeroChatRepository(
             "iv" to encrypted.iv,
             "signatureHash" to encrypted.signatureHash,
             "messageType" to messageType,
-            "encryptedMeta" to encryptedMeta.take(8000),
+            "encryptedMeta" to encryptedMeta.take(260000),
             "reactionsSummary" to "",
             "ttlSeconds" to ttlSeconds,
             "createdAt" to FieldValue.serverTimestamp(),
@@ -887,7 +882,7 @@ class ZeroChatRepository(
             put("isEdited", true)
             put("ratchetStep", ratchetStep)
         }
-        val newMetaStr = metaObj.toString().take(8000)
+        val newMetaStr = metaObj.toString().take(260000)
         if (isLocalNodeMode() || localEnvelopesFlow.value.any { it.id == envelopeId }) {
             localEnvelopesFlow.value = localEnvelopesFlow.value.map {
                 if (it.id == envelopeId) {
@@ -955,7 +950,7 @@ class ZeroChatRepository(
         requireUserId()
         if (isLocalNodeMode() || localEnvelopesFlow.value.any { it.id == envelopeId }) {
             localEnvelopesFlow.value = localEnvelopesFlow.value.map {
-                if (it.id == envelopeId) it.copy(encryptedMeta = updatedMeta.take(8000)) else it
+                if (it.id == envelopeId) it.copy(encryptedMeta = updatedMeta.take(260000)) else it
             }
             if (isLocalNodeMode()) return@runCatching
         }
@@ -963,7 +958,7 @@ class ZeroChatRepository(
         try {
             docRef.update(
                 mapOf(
-                    "encryptedMeta" to updatedMeta.take(8000),
+                    "encryptedMeta" to updatedMeta.take(260000),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             ).await()

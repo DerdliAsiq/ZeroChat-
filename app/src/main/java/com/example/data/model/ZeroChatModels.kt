@@ -155,6 +155,8 @@ data class DecryptedMessageItem(
     val audioBase64: String = "",
     val fileName: String = "",
     val fileSizeKb: Int = 0,
+    val fileBase64: String = "",
+    val fileMime: String = "application/octet-stream",
     val isViewOnce: Boolean = false,
     val isSpoiler: Boolean = false,
     val isStarred: Boolean = false,

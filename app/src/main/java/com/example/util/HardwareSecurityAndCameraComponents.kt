@@ -1009,3 +1009,82 @@ fun LiveVideoCallCameraPreview(
         }
     }
 }
+
+/**
+ * Reads an image from a local content:// URI, scales it down, compresses as JPEG,
+ * and returns a cross-device "data:image/jpeg;base64,..." payload.
+ */
+fun encodeUriToEncryptedDataUri(context: Context, uri: android.net.Uri): String? {
+    return try {
+        val rawBitmap = context.contentResolver.openInputStream(uri)?.use { stream ->
+            android.graphics.BitmapFactory.decodeStream(stream)
+        } ?: return null
+        val maxDim = 640
+        val w = rawBitmap.width.coerceAtLeast(1)
+        val h = rawBitmap.height.coerceAtLeast(1)
+        val scale = (maxDim.toFloat() / maxOf(w, h).toFloat()).coerceAtMost(1.0f)
+        val targetW = (w * scale).toInt().coerceAtLeast(1)
+        val targetH = (h * scale).toInt().coerceAtLeast(1)
+        val scaled = if (targetW != w || targetH != h) {
+            Bitmap.createScaledBitmap(rawBitmap, targetW, targetH, true)
+        } else {
+            rawBitmap
+        }
+        val baos = ByteArrayOutputStream()
+        var quality = 74
+        scaled.compress(Bitmap.CompressFormat.JPEG, quality, baos)
+        while (baos.size() > 110_000 && quality > 35) {
+            baos.reset()
+            quality -= 12
+            scaled.compress(Bitmap.CompressFormat.JPEG, quality, baos)
+        }
+        val b64 = Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
+        "data:image/jpeg;base64,$b64"
+    } catch (e: Exception) {
+        Log.e("ZeroChatMedia", "Failed to encode URI to Base64 data URI", e)
+        null
+    }
+}
+
+/**
+ * Decodes a "data:image/...;base64,..." string into a Compose ImageBitmap for cross-device rendering.
+ */
+fun decodeBase64DataUriToImageBitmap(dataUri: String): ImageBitmap? {
+    if (!dataUri.startsWith("data:image", ignoreCase = true)) return null
+    val b64Part = dataUri.substringAfter("base64,", "")
+    if (b64Part.isBlank()) return null
+    return try {
+        val bytes = Base64.decode(b64Part, Base64.DEFAULT)
+        val bmp = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        bmp?.asImageBitmap()
+    } catch (e: Exception) {
+        Log.e("ZeroChatMedia", "Failed to decode Base64 image", e)
+        null
+    }
+}
+
+/**
+ * Reads up to maxBytes of a selected document URI and encodes it as Base64 for cross-device transfer.
+ */
+fun encodeDocumentUriToBase64(context: Context, uri: android.net.Uri, maxBytes: Int = 122_880): String {
+    return try {
+        context.contentResolver.openInputStream(uri)?.use { stream ->
+            val buffer = ByteArray(maxBytes)
+            var totalRead = 0
+            while (totalRead < maxBytes) {
+                val read = stream.read(buffer, totalRead, maxBytes - totalRead)
+                if (read <= 0) break
+                totalRead += read
+            }
+            if (totalRead > 0) {
+                Base64.encodeToString(buffer.copyOf(totalRead), Base64.NO_WRAP)
+            } else {
+                ""
+            }
+        } ?: ""
+    } catch (e: Exception) {
+        Log.e("ZeroChatMedia", "Failed to encode document URI", e)
+        ""
+    }
+}
+

@@ -54,11 +54,11 @@ service cloud.firestore {
              data.senderUsername is string && data.senderUsername.size() >= 1 && data.senderUsername.size() <= 64 &&
              data.participantUids is list && data.participantUids.size() >= 1 && data.participantUids.size() <= 10 &&
              data.participantUids[0] is string &&
-             data.ciphertext is string && data.ciphertext.size() >= 1 && data.ciphertext.size() <= 16384 &&
+             data.ciphertext is string && data.ciphertext.size() >= 1 && data.ciphertext.size() <= 262144 &&
              data.iv is string && data.iv.size() >= 4 && data.iv.size() <= 128 &&
              data.signatureHash is string && data.signatureHash.size() >= 4 && data.signatureHash.size() <= 256 &&
              data.messageType is string && data.messageType in ['TEXT', 'IMAGE', 'VOICE', 'POLL', 'LOCATION', 'FILE'] &&
-             data.encryptedMeta is string && data.encryptedMeta.size() <= 8192 &&
+             data.encryptedMeta is string && data.encryptedMeta.size() <= 262144 &&
              data.reactionsSummary is string && data.reactionsSummary.size() <= 2048 &&
              data.ttlSeconds is int && data.ttlSeconds >= 0 && data.ttlSeconds <= 604800;
     }

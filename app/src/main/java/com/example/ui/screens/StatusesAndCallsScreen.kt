@@ -565,8 +565,7 @@ private fun StatusStoryViewerDialog(
 fun CallsTabScreen(
     callsState: UiState<List<CallSignal>>,
     directoryState: UiState<List<UserProfile>>,
-    onStartCall: (String, String, String) -> Unit,
-    onSimulateIncomingCall: (String, String) -> Unit = { _, _ -> }
+    onStartCall: (String, String, String) -> Unit
 ) {
     val peers = (directoryState as? UiState.Success)?.data ?: emptyList()
 

@@ -109,7 +109,6 @@ class ZeroChatViewModel(
         (cfg?.screenShieldEnabled == true) || unlocked || panic
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), false)
 
-    private val _simulatedIncomingCall = MutableStateFlow<CallSignal?>(null)
     private val dismissedCallIdsInSession = mutableSetOf<String>()
 
     val pendingOutboxItems: StateFlow<List<PendingOutboxEntity>> = vaultDao.observePendingOutbox(currentUserId)
@@ -135,8 +134,6 @@ class ZeroChatViewModel(
     val verifiedPeerHandles: StateFlow<Set<String>> = verifiedPeers
         .combine(_clockTickMillis) { list, _ -> list.map { it.peerUsername.lowercase(Locale.ROOT) }.toSet() }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptySet())
-
-    private val _simulatedKeyChangedHandles = MutableStateFlow<Set<String>>(emptySet())
 
     val scheduledEnvelopes: StateFlow<List<ScheduledEnvelopeEntity>> = vaultDao.observeScheduledEnvelopes(currentUserId)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
@@ -179,11 +176,9 @@ class ZeroChatViewModel(
 
     val keyChangedPeerHandles: StateFlow<Set<String>> = combine(
         directoryUsersState,
-        verifiedPeers,
-        _simulatedKeyChangedHandles
-    ) { dirState, verifiedList, simulatedSet ->
+        verifiedPeers
+    ) { dirState, verifiedList ->
         val changed = mutableSetOf<String>()
-        changed.addAll(simulatedSet)
         if (dirState is UiState.Success) {
             val peersByHandle = dirState.data.associateBy { it.username.lowercase(Locale.ROOT) }
             verifiedList.forEach { v ->
@@ -289,6 +284,8 @@ class ZeroChatViewModel(
             val audioB64 = metaObj.optString("audioBase64", "")
             val fileName = metaObj.optString("fileName", "")
             val fileSizeKb = metaObj.optInt("fileSizeKb", 0)
+            val fileB64 = metaObj.optString("fileBase64", "")
+            val fileMime = metaObj.optString("fileMime", "application/octet-stream")
 
             val readArr = metaObj.optJSONArray("readByUids")
             val readUids = mutableSetOf<String>()
@@ -348,6 +345,8 @@ class ZeroChatViewModel(
                 audioBase64 = audioB64,
                 fileName = fileName,
                 fileSizeKb = fileSizeKb,
+                fileBase64 = fileB64,
+                fileMime = fileMime,
                 isViewOnce = isViewOnce,
                 isSpoiler = isSpoiler,
                 isStarred = isStarred,
@@ -432,11 +431,9 @@ class ZeroChatViewModel(
     val incomingRingingCall: StateFlow<CallSignal?> = combine(
         callSignalsState,
         _activeCall,
-        _simulatedIncomingCall,
         _isPanicModeActive
-    ) { callsState, active, simulated, panic ->
+    ) { callsState, active, panic ->
         if (panic || active != null) return@combine null
-        if (simulated != null) return@combine simulated
         val list = (callsState as? UiState.Success)?.data ?: emptyList()
         val now = System.currentTimeMillis()
         list.firstOrNull { signal ->
@@ -723,36 +720,6 @@ class ZeroChatViewModel(
         }
     }
 
-    fun simulateIncomingConnectionRequest(peer: UserProfile? = null) {
-        val me = _myProfile.value ?: UserProfile(
-            id = currentUserId,
-            userId = currentUserId,
-            username = "zero_${currentUserId.take(5)}",
-            displayName = "Zero Node"
-        )
-        val peers = (directoryUsersState.value as? UiState.Success)?.data ?: emptyList()
-        val targetPeer = peer ?: peers.firstOrNull() ?: UserProfile(
-            id = "peer_siber_analist",
-            userId = "peer_siber_analist",
-            username = "siber_analist",
-            displayName = "Siber Analist Düğümü",
-            publicKey = "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE9xCyberKey9912==",
-            safetyFingerprint = "88412 90341 77219 00418 55120 66391"
-        )
-        viewModelScope.launch {
-            repository.sendDirectConnectionRequest(
-                myProfile = me,
-                peerProfile = targetPeer,
-                introNote = "👋 Merhaba @${me.username}, seni kullanıcı adınla buldum. Şifreli iletişim ve takip isteğimi onaylar mısın?",
-                simulatedIncomingFromPeer = true
-            ).onSuccess {
-                _statusBannerMessage.value = "📨 @${targetPeer.username} düğümünden yeni iletişim ve takip isteği geldi!"
-            }.onFailure { err ->
-                _statusBannerMessage.value = "Simülasyon hatası: ${err.localizedMessage}"
-            }
-        }
-    }
-
     fun deleteChatRoomFromRecent(room: ChatRoom) {
         viewModelScope.launch {
             if (_selectedRoom.value?.id == room.id) {
@@ -855,7 +822,6 @@ class ZeroChatViewModel(
                     verifiedSafetyFingerprint = finalPeer.safetyFingerprint
                 )
             )
-            _simulatedKeyChangedHandles.value = _simulatedKeyChangedHandles.value - finalPeer.username.lowercase(Locale.ROOT)
             _statusBannerMessage.value = "🛡️ QR / Düğüm Doğrulandı: @${finalPeer.username} ile şifreli sohbet açılıyor"
             startDirectChatWithPeer(
                 peer = finalPeer,
@@ -1069,7 +1035,7 @@ class ZeroChatViewModel(
         val meta = buildBaseMetaJson(nextRatchetStep, isViewOnce = isViewOnce).apply {
             put("durationSeconds", durationSeconds)
             put("waveform", amplitudePattern)
-            if (audioBase64.isNotBlank() && audioBase64.length <= 6500) {
+            if (audioBase64.isNotBlank() && audioBase64.length <= 190000) {
                 put("audioBase64", audioBase64)
             }
         }.toString()
@@ -1127,6 +1093,7 @@ class ZeroChatViewModel(
         fileName: String,
         fileSizeKb: Int,
         mimeType: String,
+        fileBase64: String = "",
         ttlSeconds: Long? = null
     ) {
         val room = _selectedRoom.value ?: return
@@ -1136,6 +1103,9 @@ class ZeroChatViewModel(
             put("fileName", fileName)
             put("fileSizeKb", fileSizeKb)
             put("fileMime", mimeType)
+            if (fileBase64.isNotBlank() && fileBase64.length <= 190000) {
+                put("fileBase64", fileBase64)
+            }
         }.toString()
         _replyingToMessage.value = null
 
@@ -1589,26 +1559,10 @@ class ZeroChatViewModel(
         }
     }
 
-    fun simulateIncomingP2PCall(peerUsername: String = "siber_dugum", callType: String = "VIDEO") {
-        val myHandle = _myProfile.value?.username ?: "zero_${currentUserId.take(5)}"
-        val emojis = CryptoEngine.deriveSafetyEmojis("SIMULATED_CALL::$peerUsername::$myHandle")
-        _simulatedIncomingCall.value = CallSignal(
-            id = "sim_${System.currentTimeMillis()}",
-            callerId = "peer_$peerUsername",
-            callerUsername = peerUsername.removePrefix("@"),
-            calleeUsername = myHandle,
-            participantUids = listOf(currentUserId),
-            callType = callType,
-            status = "RINGING",
-            safetyEmojis = emojis
-        )
-    }
-
     fun acceptIncomingCall(call: CallSignal) {
-        _simulatedIncomingCall.value = null
         dismissedCallIdsInSession.add(call.id)
         _activeCall.value = call.copy(status = "CONNECTED")
-        if (!call.id.startsWith("sim_") && call.id.isNotBlank()) {
+        if (call.id.isNotBlank()) {
             viewModelScope.launch {
                 repository.acceptEncryptedCall(call.id)
             }
@@ -1616,21 +1570,20 @@ class ZeroChatViewModel(
     }
 
     fun declineIncomingCall(call: CallSignal) {
-        _simulatedIncomingCall.value = null
         dismissedCallIdsInSession.add(call.id)
-        if (!call.id.startsWith("sim_") && call.id.isNotBlank()) {
+        if (call.id.isNotBlank()) {
             viewModelScope.launch {
                 repository.endEncryptedCall(call.id)
             }
         }
-        _statusBannerMessage.value = "@${call.callerUsername} gelen شifreli araması reddedildi"
+        _statusBannerMessage.value = "@${call.callerUsername} gelen şifreli araması reddedildi"
     }
 
     fun endActiveCall() {
         val current = _activeCall.value ?: return
         _activeCall.value = null
         viewModelScope.launch {
-            if (!current.id.startsWith("sim_") && current.id.isNotBlank()) {
+            if (current.id.isNotBlank()) {
                 repository.endEncryptedCall(current.id)
             }
         }
@@ -1665,16 +1618,8 @@ class ZeroChatViewModel(
                     verifiedSafetyFingerprint = safetyFp
                 )
             )
-            _simulatedKeyChangedHandles.value = _simulatedKeyChangedHandles.value - handle
             _statusBannerMessage.value = "🛡️ @${room.title.removePrefix("@")} düğümü 'Doğrulanmış (Verified)' olarak mühürlendi!"
         }
-    }
-
-    fun simulateMitmKeyChangeForActiveRoom() {
-        val room = _selectedRoom.value ?: return
-        val handle = room.title.removePrefix("@").trim().lowercase(Locale.ROOT)
-        _simulatedKeyChangedHandles.value = _simulatedKeyChangedHandles.value + handle
-        _statusBannerMessage.value = "⚠️ MITM Anahtar Değişimi Simülasyonu Tetiklendi: @$handle"
     }
 
     fun scheduleEncryptedMessage(plaintext: String, delaySeconds: Long, ttlOverride: Long?) {

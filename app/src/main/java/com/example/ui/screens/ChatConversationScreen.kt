@@ -5,15 +5,19 @@ import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.PersistableBundle
 import android.provider.OpenableColumns
+import android.util.Base64
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -54,6 +58,7 @@ import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.EnhancedEncryption
+import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Image
@@ -134,6 +139,9 @@ import com.example.ui.theme.ObsidianBlack
 import com.example.ui.theme.OutgoingBubbleSurface
 import com.example.util.RealCameraPhotoCaptureDialog
 import com.example.util.VoiceAudioManager
+import com.example.util.decodeBase64DataUriToImageBitmap
+import com.example.util.encodeDocumentUriToBase64
+import com.example.util.encodeUriToEncryptedDataUri
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -165,7 +173,6 @@ fun ChatConversationScreen(
     onUpdateGroupMembersAndTitle: (String, List<UserProfile>) -> Unit = { _, _ -> },
     onRotateRoomKey: () -> Unit = {},
     onVerifyRoomIdentity: () -> Unit = {},
-    onSimulateMitmKeyChange: () -> Unit = {},
     onScheduleMessage: (String, Long, Long?) -> Unit = { _, _, _ -> },
     onCancelScheduledMessage: (Long) -> Unit = {},
     onNukeRoomHistory: () -> Unit = {},
@@ -176,7 +183,7 @@ fun ChatConversationScreen(
     onSendText: (String, Long?, Boolean, Boolean) -> Unit,
     onSendVoiceNote: (Int, String, String, Long?) -> Unit,
     onSendImageAttachment: (String, String, Long?, Boolean, String) -> Unit,
-    onSendFileAttachment: (String, Int, String, Long?) -> Unit = { _, _, _, _ -> },
+    onSendFileAttachment: (String, Int, String, String, Long?) -> Unit = { _, _, _, _, _ -> },
     onSendLocation: (Double, Double, String, Long?) -> Unit,
     onSendPoll: (String, List<String>, Long?) -> Unit,
     onVotePoll: (DecryptedMessageItem, Int) -> Unit,
@@ -239,13 +246,36 @@ fun ChatConversationScreen(
         messages.lastOrNull { it.isPinned }
     }
 
+    var pendingDownloadMessage by remember { mutableStateOf<DecryptedMessageItem?>(null) }
+
+    val saveDownloadedFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("*/*")
+    ) { targetUri ->
+        val msgToSave = pendingDownloadMessage
+        pendingDownloadMessage = null
+        if (targetUri != null && msgToSave != null) {
+            try {
+                val bytesToWrite = if (msgToSave.fileBase64.isNotBlank()) {
+                    Base64.decode(msgToSave.fileBase64, Base64.DEFAULT)
+                } else {
+                    msgToSave.decryptedText.toByteArray(Charsets.UTF_8)
+                }
+                context.contentResolver.openOutputStream(targetUri)?.use { out ->
+                    out.write(bytesToWrite)
+                }
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     // Zero-permission Android Photo Picker (Google Play Policy compliant)
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri != null) {
+            val encodedDataUri = encodeUriToEncryptedDataUri(context, uri) ?: uri.toString()
             onSendImageAttachment(
-                uri.toString(),
+                encodedDataUri,
                 if (isViewOnceSelected) "🔥👁️ 1 Kez Görüntülenebilir Şifreli Görsel" else "📷 Şifreli Görsel Paylaşımı",
                 selectedTtlOverride,
                 isViewOnceSelected,
@@ -261,7 +291,7 @@ fun ChatConversationScreen(
     ) { uri ->
         if (uri != null) {
             var displayName = "sifreli_belge.bin"
-            var sizeKb = 24
+            var sizeKb = 1
             try {
                 context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
                     if (cursor.moveToFirst()) {
@@ -278,7 +308,8 @@ fun ChatConversationScreen(
             } catch (_: Exception) {
             }
             val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
-            onSendFileAttachment(displayName, sizeKb, mime, selectedTtlOverride)
+            val fileB64 = encodeDocumentUriToBase64(context, uri)
+            onSendFileAttachment(displayName, sizeKb, mime, fileB64, selectedTtlOverride)
         }
     }
 
@@ -751,6 +782,30 @@ fun ChatConversationScreen(
                     },
                     onOpenViewOnce = {
                         activeViewOnceMessage = msg
+                    },
+                    onDownloadFile = {
+                        pendingDownloadMessage = msg
+                        val suggestedName = msg.fileName.ifBlank { "zerochat_${msg.id.take(8)}.bin" }
+                        saveDownloadedFileLauncher.launch(suggestedName)
+                    },
+                    onOpenLocationInMaps = { lat, lng, label ->
+                        try {
+                            val geoUri = Uri.parse("geo:$lat,$lng?q=$lat,$lng(${Uri.encode(label)})")
+                            val mapIntent = Intent(Intent.ACTION_VIEW, geoUri).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            context.startActivity(mapIntent)
+                        } catch (_: Exception) {
+                            try {
+                                val webUri = Uri.parse("https://maps.google.com/?q=$lat,$lng")
+                                context.startActivity(
+                                    Intent(Intent.ACTION_VIEW, webUri).apply {
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                )
+                            } catch (_: Exception) {
+                            }
+                        }
                     },
                     onInspectCipher = {
                         inspectedMessage = msg
@@ -1259,7 +1314,6 @@ fun ChatConversationScreen(
             isPeerVerified = isRoomPeerVerified,
             hasKeyChangedWarning = hasRoomKeyChangedWarning,
             onVerifyIdentity = onVerifyRoomIdentity,
-            onSimulateKeyChange = onSimulateMitmKeyChange,
             onDismiss = { showRoomInspector = false }
         )
     }
@@ -1397,6 +1451,8 @@ private fun EncryptedMessageBubble(
     isPlayingAudio: Boolean,
     onPlayVoiceNote: (Float) -> Unit,
     onOpenViewOnce: () -> Unit,
+    onDownloadFile: () -> Unit = {},
+    onOpenLocationInMaps: (Double, Double, String) -> Unit = { _, _, _ -> },
     onInspectCipher: () -> Unit,
     onCopySecurely: () -> Unit,
     onReply: () -> Unit,
@@ -1711,31 +1767,147 @@ private fun EncryptedMessageBubble(
                             Surface(
                                 shape = RoundedCornerShape(12.dp),
                                 color = ObsidianBlack,
-                                border = BorderStroke(1.dp, CyberCyan.copy(alpha = 0.45f)),
-                                modifier = Modifier.fillMaxWidth()
+                                border = BorderStroke(1.dp, CyberCyan.copy(alpha = 0.6f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onDownloadFile() }
+                                    .testTag("download_file_bubble_${message.id}")
                             ) {
                                 Row(
                                     modifier = Modifier.padding(10.dp),
-                                    verticalAlignment = Alignment.CenterVertically
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Description,
-                                        contentDescription = null,
-                                        tint = CyberCyan,
-                                        modifier = Modifier.size(28.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(10.dp))
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = message.fileName.ifBlank { message.decryptedText },
-                                            style = MaterialTheme.typography.titleSmall,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.onSurface
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Description,
+                                            contentDescription = null,
+                                            tint = CyberCyan,
+                                            modifier = Modifier.size(28.dp)
                                         )
+                                        Spacer(modifier = Modifier.width(10.dp))
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = message.fileName.ifBlank { message.decryptedText },
+                                                style = MaterialTheme.typography.titleSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.onSurface
+                                            )
+                                            Text(
+                                                text = "${message.fileSizeKb.coerceAtLeast(1)} KB • Cihaza İndirmek İçin Dokun",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = NeonCyberGreen
+                                            )
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = NeonCyberGreen.copy(alpha = 0.18f),
+                                        border = BorderStroke(1.dp, NeonCyberGreen.copy(alpha = 0.6f))
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.FileDownload,
+                                                contentDescription = "Dosyayı İndir",
+                                                tint = NeonCyberGreen,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text(
+                                                text = "İndir",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = NeonCyberGreen
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        "LOCATION" -> {
+                            val (lat, lng, label) = remember(message.encryptedMeta, message.decryptedText) {
+                                try {
+                                    val obj = org.json.JSONObject(message.encryptedMeta)
+                                    Triple(
+                                        obj.optDouble("lat", 41.0082),
+                                        obj.optDouble("lng", 28.9784),
+                                        obj.optString("label", "Şifreli GPS Konumu")
+                                    )
+                                } catch (_: Exception) {
+                                    Triple(41.0082, 28.9784, message.decryptedText)
+                                }
+                            }
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = ObsidianBlack,
+                                border = BorderStroke(1.dp, NeonCyberGreen.copy(alpha = 0.65f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onOpenLocationInMaps(lat, lng, label) }
+                                    .testTag("open_location_maps_${message.id}")
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp)) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            modifier = Modifier.weight(1f)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.LocationOn,
+                                                contentDescription = null,
+                                                tint = BurnCoralRed,
+                                                modifier = Modifier.size(26.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Column {
+                                                Text(
+                                                    text = label,
+                                                    style = MaterialTheme.typography.titleSmall,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = NeonCyberGreen
+                                                )
+                                                Text(
+                                                    text = String.format(Locale.US, "GPS: %.5f, %.5f", lat, lng),
+                                                    fontFamily = JetBrainsMonoFontFamily,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = CyberCyan
+                                                )
+                                            }
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Button(
+                                        onClick = { onOpenLocationInMaps(lat, lng, label) },
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = NeonCyberGreen,
+                                            contentColor = Color(0xFF002110)
+                                        ),
+                                        shape = RoundedCornerShape(10.dp),
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.LocationOn,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
                                         Text(
-                                            text = "${message.fileSizeKb.coerceAtLeast(1)} KB • AES-256-GCM Şifreli Belge",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = NeonCyberGreen
+                                            text = "Haritalarda Aç (GPS Navigasyon)",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = FontWeight.Bold
                                         )
                                     }
                                 }
@@ -1750,14 +1922,28 @@ private fun EncryptedMessageBubble(
                                     ""
                                 }
                             }
-                            if (mediaUri.isNotBlank()) {
+                            val decodedBase64Bitmap = remember(mediaUri) {
+                                decodeBase64DataUriToImageBitmap(mediaUri)
+                            }
+                            if (decodedBase64Bitmap != null) {
+                                Image(
+                                    bitmap = decodedBase64Bitmap,
+                                    contentDescription = "Şifreli Görsel",
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(190.dp)
+                                        .clip(RoundedCornerShape(12.dp))
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                            } else if (mediaUri.isNotBlank()) {
                                 AsyncImage(
                                     model = mediaUri,
                                     contentDescription = "Şifreli Görsel",
                                     contentScale = ContentScale.Crop,
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .height(170.dp)
+                                        .height(190.dp)
                                         .clip(RoundedCornerShape(12.dp))
                                 )
                                 Spacer(modifier = Modifier.height(6.dp))
@@ -2199,6 +2385,15 @@ private fun ViewOnceRevealDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(14.dp))
+                val viewOnceImageBitmap = remember(message.encryptedMeta) {
+                    val mediaUri = try {
+                        org.json.JSONObject(message.encryptedMeta).optString("mediaUri", "")
+                    } catch (_: Exception) {
+                        ""
+                    }
+                    decodeBase64DataUriToImageBitmap(mediaUri)
+                }
+
                 Surface(
                     shape = RoundedCornerShape(14.dp),
                     color = ObsidianBlack,
@@ -2206,6 +2401,18 @@ private fun ViewOnceRevealDialog(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
+                        if (viewOnceImageBitmap != null) {
+                            Image(
+                                bitmap = viewOnceImageBitmap,
+                                contentDescription = "Tek Seferlik Görsel",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(220.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                            )
+                            Spacer(modifier = Modifier.height(10.dp))
+                        }
                         Text(
                             text = message.decryptedText,
                             style = MaterialTheme.typography.bodyLarge,
@@ -2236,6 +2443,7 @@ private fun SteganographyComposerDialog(
     onDismiss: () -> Unit,
     onSendStegoImage: (String, String, String) -> Unit
 ) {
+    val context = LocalContext.current
     var visibleCaption by remember { mutableStateOf("📷 Siber Ağ Topolojisi Görseli") }
     var secretMessage by remember { mutableStateOf("") }
     var pickedUri by remember { mutableStateOf("") }
@@ -2244,7 +2452,7 @@ private fun SteganographyComposerDialog(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri != null) {
-            pickedUri = uri.toString()
+            pickedUri = encodeUriToEncryptedDataUri(context, uri) ?: uri.toString()
         }
     }
 

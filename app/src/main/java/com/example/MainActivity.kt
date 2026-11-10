@@ -383,7 +383,6 @@ fun ZeroChatAuthenticatedShell(
                     onUpdateGroupMembersAndTitle = viewModel::updateActiveGroupMembersAndTitle,
                     onRotateRoomKey = viewModel::rotateActiveRoomEncryptionKey,
                     onVerifyRoomIdentity = viewModel::verifyActiveRoomIdentity,
-                    onSimulateMitmKeyChange = viewModel::simulateMitmKeyChangeForActiveRoom,
                     onScheduleMessage = viewModel::scheduleEncryptedMessage,
                     onCancelScheduledMessage = viewModel::cancelScheduledMessage,
                     onNukeRoomHistory = viewModel::nukeActiveRoomHistory,
@@ -400,8 +399,8 @@ fun ZeroChatAuthenticatedShell(
                     onSendImageAttachment = { uri, cap, ttl, isViewOnce, stegoSecret ->
                         viewModel.sendImageAttachmentMessage(uri, cap, ttl, isViewOnce, stegoSecret)
                     },
-                    onSendFileAttachment = { name, sizeKb, mime, ttl ->
-                        viewModel.sendFileAttachmentMessage(name, sizeKb, mime, ttl)
+                    onSendFileAttachment = { name, sizeKb, mime, fileB64, ttl ->
+                        viewModel.sendFileAttachmentMessage(name, sizeKb, mime, fileB64, ttl)
                     },
                     onSendLocation = { lat, lng, lbl, ttl ->
                         viewModel.sendLocationMessage(lat, lng, lbl, ttl)
@@ -442,7 +441,6 @@ fun ZeroChatAuthenticatedShell(
                             },
                             onApproveConnectionRequest = viewModel::approveConnectionRequest,
                             onRejectConnectionRequest = viewModel::rejectOrCancelConnectionRequest,
-                            onSimulateIncomingRequest = { viewModel.simulateIncomingConnectionRequest() },
                             onOpenRoom = viewModel::openRoom,
                             onDeleteRoom = viewModel::deleteChatRoomFromRecent,
                             onToggleRoomVaultLock = viewModel::toggleRoomVaultLock,
@@ -473,9 +471,6 @@ fun ZeroChatAuthenticatedShell(
                             directoryState = directoryState,
                             onStartCall = { uid, handle, type ->
                                 viewModel.startP2PCall(uid, handle, type)
-                            },
-                            onSimulateIncomingCall = { peerHandle, callType ->
-                                viewModel.simulateIncomingP2PCall(peerHandle, callType)
                             }
                         )
                     }

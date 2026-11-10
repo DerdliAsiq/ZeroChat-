@@ -114,7 +114,6 @@ fun ChatListAndDiscoveryScreen(
     onSelectPeerForChat: (UserProfile, String) -> Unit,
     onApproveConnectionRequest: (ChatRoom) -> Unit = {},
     onRejectConnectionRequest: (ChatRoom) -> Unit = {},
-    onSimulateIncomingRequest: () -> Unit = {},
     onOpenRoom: (ChatRoom) -> Unit,
     onDeleteRoom: (ChatRoom) -> Unit = {},
     onTogglePinRoom: (String, Boolean) -> Unit = { _, _ -> },

@@ -41,8 +41,8 @@ class VoiceAudioManager(private val context: Context) {
             recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
             recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-            recorder.setAudioEncodingBitRate(32000)
-            recorder.setAudioSamplingRate(16000)
+            recorder.setAudioEncodingBitRate(16000)
+            recorder.setAudioSamplingRate(12000)
             recorder.setOutputFile(outFile.absolutePath)
             recorder.prepare()
             recorder.start()
@@ -51,7 +51,7 @@ class VoiceAudioManager(private val context: Context) {
             amplitudeSamples.clear()
             true
         } catch (e: Exception) {
-            Log.w("VoiceAudioManager", "Hardware mic recording fallback triggered: ${e.message}")
+            Log.w("VoiceAudioManager", "Hardware mic recording failed: ${e.message}")
             startTimestampMillis = System.currentTimeMillis()
             mediaRecorder = null
             false
@@ -60,10 +60,10 @@ class VoiceAudioManager(private val context: Context) {
 
     fun sampleAmplitude() {
         try {
-            val amp = mediaRecorder?.maxAmplitude ?: (1500..18000).random()
-            amplitudeSamples.add(amp)
+            val amp = mediaRecorder?.maxAmplitude ?: 0
+            amplitudeSamples.add(amp.coerceAtLeast(0))
         } catch (_: Exception) {
-            amplitudeSamples.add((1500..18000).random())
+            amplitudeSamples.add(0)
         }
     }
 
@@ -77,12 +77,12 @@ class VoiceAudioManager(private val context: Context) {
             }
             mediaRecorder = null
             val file = currentOutputFile
-            if (file != null && file.exists() && file.length() in 100..45000) {
+            if (file != null && file.exists() && file.length() in 64..135000) {
                 base64Audio = Base64.encodeToString(file.readBytes(), Base64.NO_WRAP)
             }
             file?.delete()
         } catch (e: Exception) {
-            Log.w("VoiceAudioManager", "Stop recording completed with fallback waveform: ${e.message}")
+            Log.w("VoiceAudioManager", "Stop recording error: ${e.message}")
         } finally {
             stopRecordingCleanup()
         }
@@ -94,7 +94,7 @@ class VoiceAudioManager(private val context: Context) {
                 bars[idx]
             }.joinToString("")
         } else {
-            "▃▅▇█▆▄▂▅▇█▆▄▃▅▇"
+            "▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂"
         }
 
         return RecordedVoiceClip(

@@ -1,6 +1,6 @@
 {
-  "summary":  "ZeroChat için kapsamlı mimari, uçtan uca şifreleme (E2EE), kullanıcı adı keşif dizini, WhatsApp benzeri zengin mesajlaşma özellikleri ve siber güvenlik odaklı koyu neon yeşil tema uygulama planı.",
-  "updatedAt":  "2026-11-08T19:55:46.067472436Z",
+  "summary":  "ZeroChat uygulamasındaki tüm kalan demo/simülasyon öğelerinin kaldırılması, gerçek Base64 şifreli fotoğraf/ses/belge iletimi, etkileşimli dosya indirme ve harita açma aksiyonları ile tam kapsamlı kriptografik QR doğrulama mimarisini içeren uygulama planı.",
+  "updatedAt":  "2026-11-10T16:59:48.919246212Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

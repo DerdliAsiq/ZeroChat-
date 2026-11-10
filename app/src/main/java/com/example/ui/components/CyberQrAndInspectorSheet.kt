@@ -119,7 +119,6 @@ fun RoomSafetyAndCipherInspectorDialog(
     isPeerVerified: Boolean = false,
     hasKeyChangedWarning: Boolean = false,
     onVerifyIdentity: () -> Unit = {},
-    onSimulateKeyChange: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
     val safetyNumber = remember(room.roomKeyHint) {
@@ -350,23 +349,6 @@ fun RoomSafetyAndCipherInspectorDialog(
                             else -> "Parmak İzini Doğrula ve Mühürle (Verify)"
                         },
                         fontWeight = FontWeight.Bold
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                OutlinedButton(
-                    onClick = onSimulateKeyChange,
-                    border = BorderStroke(1.dp, AmberTimerWarning),
-                    shape = RoundedCornerShape(14.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("simulate_mitm_key_change_button")
-                ) {
-                    Text(
-                        text = "⚠️ MITM Anahtar Değişimi Uyarısını Test Et",
-                        color = AmberTimerWarning,
-                        style = MaterialTheme.typography.labelMedium
                     )
                 }
             }

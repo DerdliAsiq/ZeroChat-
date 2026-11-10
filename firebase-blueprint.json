@@ -145,7 +145,7 @@
         },
         "ciphertext": {
           "type": "string",
-          "description": "Base64 AES-256-GCM encrypted message body."
+          "description": "Base64 AES-256-GCM encrypted message body (up to 262144 chars)."
         },
         "iv": {
           "type": "string",
@@ -162,7 +162,7 @@
         },
         "encryptedMeta": {
           "type": "string",
-          "description": "Encrypted or structured metadata for polls, voice waveform, location, or media."
+          "description": "Encrypted or structured metadata for polls, voice waveform/audio, location, documents, or Base64 media (up to 262144 chars)."
         },
         "reactionsSummary": {
           "type": "string",
