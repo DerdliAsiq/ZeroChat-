@@ -1493,10 +1493,13 @@ jobs:
           4wxl5othJvYUg9iU8bSAIgI3g3HsAAAAAAB8TTVV9TuUjwABjdQG/tgzRSUOcbHEZ/sCAAAAAARZWg==
           EOF
 
-      - name: Debug APK Derle
+      - name: Gradle Kurulumu
         uses: gradle/actions/setup-gradle@v4
-        with:
-          arguments: assembleDebug -x lint --stacktrace
+
+      - name: Debug APK Derle
+        run: |
+          chmod +x ./gradlew
+          ./gradlew assembleDebug -x lint --stacktrace --no-daemon
 
       - name: APK Dosyasini Artifacts Olarak Yukle
         uses: actions/upload-artifact@v4
