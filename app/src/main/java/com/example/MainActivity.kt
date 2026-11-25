@@ -61,9 +61,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
-import com.example.crypto.IdentityKeyManager
-import com.example.data.local.LocalVaultDatabase
-import com.example.data.repository.ZeroChatRepository
+import com.example.data.ScheduledMessageWorker
+import com.example.data.ZeroChatServices
 import com.example.ui.UiState
 import com.example.ui.ZeroChatViewModel
 import com.example.ui.auth.AuthScreen
@@ -90,7 +89,6 @@ import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
-import java.io.File
 
 internal fun FirebaseAuth.authStateFlow(): Flow<FirebaseUser?> = callbackFlow {
     val listener = FirebaseAuth.AuthStateListener { auth ->
@@ -169,15 +167,15 @@ fun ZeroChatAuthenticatedShell(
         key = currentUserId,
         factory = viewModelFactory {
             initializer {
-                val databaseId = app.getString(R.string.firestore_database_id)
-                val db = FirebaseFirestore.getInstance(databaseId)
-                val vaultDb = LocalVaultDatabase.getInstance(app)
                 ZeroChatViewModel(
-                    repository = ZeroChatRepository(db, IdentityKeyManager(File(app.filesDir, "identity"))),
-                    vaultDao = vaultDb.vaultDao(),
+                    repository = ZeroChatServices.repository(app),
+                    vaultDao = ZeroChatServices.vaultDao(app),
                     currentUserId = currentUserId,
                     preferredHandle = getPreferredHandle(app),
-                    displayNameHint = displayNameHint
+                    displayNameHint = displayNameHint,
+                    onScheduledMessagesChanged = { next ->
+                        if (next == null) ScheduledMessageWorker.cancel(app) else ScheduledMessageWorker.schedule(app, next)
+                    }
                 )
             }
         }
@@ -274,6 +272,8 @@ fun ZeroChatAuthenticatedShell(
             val changingConfig = (context as? Activity)?.isChangingConfigurations == true
             if (event == Lifecycle.Event.ON_STOP && !changingConfig) {
                 viewModel.onAppBackgrounded()
+            } else if (event == Lifecycle.Event.ON_START) {
+                viewModel.onAppForegrounded()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)

@@ -80,7 +80,9 @@ class ZeroChatViewModel(
     private val vaultDao: LocalVaultDao,
     val currentUserId: String,
     private val preferredHandle: String?,
-    private val displayNameHint: String?
+    private val displayNameHint: String?,
+    /** Called with the next due time of a scheduled message (null = none) to arm WorkManager. */
+    private val onScheduledMessagesChanged: (Long?) -> Unit = {}
 ) : ViewModel() {
 
     // ------------------------------------------------------------------ simple UI state
@@ -320,6 +322,13 @@ class ZeroChatViewModel(
     }.distinctUntilChanged().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), null)
 
     private val openedCache = ConcurrentHashMap<String, OpenedEnvelope>()
+    private val annotationValueCache = ConcurrentHashMap<String, String>()
+
+    private suspend fun annotationValue(roomId: String, ann: RoomAnnotation): String? {
+        val key = "${ann.id}|${ann.ciphertext.hashCode()}"
+        annotationValueCache[key]?.let { return it }
+        return repository.decryptAnnotation(roomId, ann)?.also { annotationValueCache[key] = it }
+    }
     private val expiredHandled = ConcurrentHashMap.newKeySet<String>()
     private val cachedToVault = ConcurrentHashMap.newKeySet<String>()
 
@@ -422,11 +431,11 @@ class ZeroChatViewModel(
             for (ann in anns) {
                 when (ann.kind) {
                     AnnotationKind.PIN -> pinned = true
-                    AnnotationKind.REACTION -> repository.decryptAnnotation(room.id, ann)?.let { emoji ->
+                    AnnotationKind.REACTION -> annotationValue(room.id, ann)?.let { emoji ->
                         val handle = inputs.profiles[ann.uid]?.username ?: ann.uid.take(6)
                         reactions[handle] = emoji
                     }
-                    AnnotationKind.VOTE -> repository.decryptAnnotation(room.id, ann)?.toIntOrNull()?.let {
+                    AnnotationKind.VOTE -> annotationValue(room.id, ann)?.toIntOrNull()?.let {
                         votesByUid[ann.uid] = it
                     }
                 }
@@ -1359,6 +1368,11 @@ class ZeroChatViewModel(
 
     private val scheduleWakeup = Channel<Unit>(Channel.CONFLATED)
 
+    private suspend fun refreshScheduledWork() {
+        val next = runCatching { vaultDao.nextScheduledAt(currentUserId) }.getOrNull()
+        onScheduledMessagesChanged(next)
+    }
+
     fun scheduleEncryptedMessage(plaintext: String, delaySeconds: Long, ttlOverride: Long?) {
         val room = _selectedRoom.value ?: return
         val clean = plaintext.trim()
@@ -1378,6 +1392,7 @@ class ZeroChatViewModel(
                 )
             )
             scheduleWakeup.trySend(Unit)
+            refreshScheduledWork()
             banner("⏳ Mesaj $delaySeconds sn sonra gönderilecek")
         }
     }
@@ -1385,6 +1400,7 @@ class ZeroChatViewModel(
     fun cancelScheduledMessage(id: Long) {
         viewModelScope.launch {
             vaultDao.deleteScheduledEnvelope(id)
+            refreshScheduledWork()
             banner("Zamanlanmış mesaj iptal edildi")
         }
     }
@@ -1427,6 +1443,7 @@ class ZeroChatViewModel(
                 }
                 .onFailure { Log.w(TAG, "scheduled send failed, will retry", it) }
         }
+        refreshScheduledWork()
     }
 
     // ------------------------------------------------------------------ statuses
@@ -1589,6 +1606,11 @@ class ZeroChatViewModel(
 
     fun onAppBackgrounded() {
         if (securityConfig.value?.autoLockOnBackground != false) _isVaultUnlocked.value = false
+        viewModelScope.launch { repository.setPresence(false) }
+    }
+
+    fun onAppForegrounded() {
+        viewModelScope.launch { repository.setPresence(true) }
     }
 
     fun updateVaultPins(newNormalPin: String, newPanicPin: String) {
@@ -1719,6 +1741,7 @@ class ZeroChatViewModel(
             vaultDao.clearCachedMessages(currentUserId)
             vaultDao.clearOutbox(currentUserId)
             vaultDao.clearScheduled(currentUserId)
+            onScheduledMessagesChanged(null)
             _exportedVaultBackupText.value = null
             repository.clearCaches()
             onDone()

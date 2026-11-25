@@ -108,6 +108,7 @@ dependencies {
   implementation(libs.androidx.biometric)
   implementation(libs.zxing.core)
   implementation(libs.sqlcipher.android)
+  implementation(libs.androidx.work.runtime.ktx)
   implementation(libs.androidx.sqlite)
   implementation(libs.androidx.compose.material.icons.core)
   implementation(libs.androidx.compose.material.icons.extended)
