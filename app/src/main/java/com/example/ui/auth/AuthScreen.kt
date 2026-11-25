@@ -381,14 +381,14 @@ fun AuthScreen(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
-                        text = "🔐 Şifreli Siber Düğümü Başlat",
+                        text = "🔐 Güvenli Oturum Aç",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
                         color = NeonCyberGreen
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "Google hesabınızla giriş yaparak gerçek zamanlı Firestore bulut dizinine bağlanın ve cihazınızın donanım ECDH P-256 + AES-256-GCM anahtar çiftini etkinleştirin.",
+                        text = "Google hesabınızla giriş yapın. Şifreleme anahtarlarınız bu cihazda oluşturulur ve cihazdan çıkmaz; mesajlarınızı yalnızca sohbet ettiğiniz kişiler okuyabilir.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = TextAlign.Center
@@ -521,7 +521,7 @@ fun AuthScreen(
             Spacer(modifier = Modifier.height(8.dp))
             FeatureSpecCard(
                 icon = Icons.Default.VisibilityOff,
-                title = "Donanım Biyometrik Kasa & Süreli İmha",
+                title = "Biyometrik Kasa ve Süreli Mesajlar",
                 description = "Gerçek parmak izi sensörü ile korunan gizli kasa ve okunduktan sonra kendini imha eden mesajlar."
             )
             Spacer(modifier = Modifier.height(12.dp))

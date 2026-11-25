@@ -1132,7 +1132,7 @@ private fun DirectoryPeerChipCard(
                             Spacer(modifier = Modifier.width(4.dp))
                             Icon(
                                 imageVector = Icons.Default.CheckCircle,
-                                contentDescription = "Doğrulanmış Düğüm",
+                                contentDescription = "Doğrulanmış kişi",
                                 tint = NeonCyberGreen,
                                 modifier = Modifier.size(14.dp)
                             )
@@ -1712,7 +1712,7 @@ private fun CreateEncryptedGroupDialog(
                 )
                 Spacer(modifier = Modifier.height(10.dp))
                 Text(
-                    text = "Varsayılan Mesaj İmha Süresi:",
+                    text = "Varsayılan mesaj silinme süresi:",
                     style = MaterialTheme.typography.labelSmall,
                     color = CyberCyan
                 )
@@ -1728,7 +1728,7 @@ private fun CreateEncryptedGroupDialog(
                 }
                 Spacer(modifier = Modifier.height(10.dp))
                 Text(
-                    text = "Eklenecek @kullanici_adi Düğümleri (${selectedPeers.size} seçildi):",
+                    text = "Eklenecek kişiler (${selectedPeers.size} seçildi):",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

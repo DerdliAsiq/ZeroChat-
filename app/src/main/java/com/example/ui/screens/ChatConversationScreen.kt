@@ -1535,7 +1535,7 @@ private fun EncryptedMessageBubble(
                             Spacer(modifier = Modifier.width(5.dp))
                             Icon(
                                 imageVector = Icons.Default.Star,
-                                contentDescription = "Yıldızlı Zarf",
+                                contentDescription = "Yıldızlı mesaj",
                                 tint = AmberTimerWarning,
                                 modifier = Modifier.size(13.dp)
                             )
@@ -1619,7 +1619,7 @@ private fun EncryptedMessageBubble(
                             Spacer(modifier = Modifier.width(10.dp))
                             Column {
                                 Text(
-                                    text = "🔥👁️ 1 Kez Görüntülenebilir Şifreli Zarf",
+                                    text = "🔥👁️ Tek seferlik görüntülenebilir mesaj",
                                     style = MaterialTheme.typography.titleSmall,
                                     fontWeight = FontWeight.Bold,
                                     color = BurnCoralRed
@@ -2190,7 +2190,7 @@ private fun EncryptedMessageBubble(
                         ) {
                             Icon(
                                 imageVector = Icons.Default.DeleteForever,
-                                contentDescription = "Mesajı Şimdi İmha Et",
+                                contentDescription = "Mesajı şimdi sil",
                                 tint = BurnCoralRed,
                                 modifier = Modifier.size(17.dp)
                             )
@@ -2226,7 +2226,7 @@ private fun ScheduleEncryptedMessageDialog(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "⏳ Zamanlanmış Şifreli Zarf",
+                        text = "⏳ Zamanlanmış mesaj",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
@@ -2371,7 +2371,7 @@ private fun ViewOnceRevealDialog(
                 ) {
                     Icon(imageVector = Icons.Default.DeleteForever, contentDescription = null)
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Kapat ve Zarfı Şimdi İmha Et", fontWeight = FontWeight.Bold)
+                    Text("Kapat", fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -2414,7 +2414,7 @@ private fun GroupManagementAndKeyRotationDialog(
                 )
                 Spacer(modifier = Modifier.height(10.dp))
                 Text(
-                    text = "Katılımcı Düğümler (@kullanici_adi):",
+                    text = "Üyeler (@kullanici_adi):",
                     style = MaterialTheme.typography.labelSmall,
                     color = CyberCyan
                 )
