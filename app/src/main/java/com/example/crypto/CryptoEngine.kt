@@ -44,7 +44,7 @@ object CryptoEngine {
 
     const val PROTOCOL_VERSION = 2
     const val PIN_PBKDF2_ITERATIONS = 120_000
-    const val BACKUP_PBKDF2_ITERATIONS = 310_000
+    const val BACKUP_PBKDF2_ITERATIONS = 600_000
     const val MIN_BACKUP_PASSWORD_LENGTH = 10
     const val MIN_PIN_LENGTH = 6
 

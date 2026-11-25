@@ -122,8 +122,9 @@ fun authenticateWithRealBiometrics(
     onError: (String) -> Unit
 ) {
     val biometricManager = BiometricManager.from(context)
-    val authenticators = BiometricManager.Authenticators.BIOMETRIC_STRONG or
-        BiometricManager.Authenticators.BIOMETRIC_WEAK
+    // Class 3 biometrics only, bound to a Keystore key (CryptoObject) so the unlock is
+    // confirmed by secure hardware and not just by an app callback.
+    val authenticators = BiometricManager.Authenticators.BIOMETRIC_STRONG
 
     when (biometricManager.canAuthenticate(authenticators)) {
         BiometricManager.BIOMETRIC_SUCCESS -> {
@@ -157,6 +158,18 @@ fun authenticateWithRealBiometrics(
         return
     }
 
+    val cipher = try {
+        biometricVaultCipher()
+    } catch (e: android.security.keystore.KeyPermanentlyInvalidatedException) {
+        // A new fingerprint was enrolled: the old key is gone; require the PIN once.
+        resetBiometricVaultKey()
+        onError("Biyometrik kayıtlar değişti. Kasayı bir kez PIN ile açın.")
+        return
+    } catch (e: Exception) {
+        onError("Biyometrik anahtar oluşturulamadı: ${e.message}")
+        return
+    }
+
     val executor = ContextCompat.getMainExecutor(context)
     val prompt = BiometricPrompt(
         activity,
@@ -164,7 +177,13 @@ fun authenticateWithRealBiometrics(
         object : BiometricPrompt.AuthenticationCallback() {
             override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
                 super.onAuthenticationSucceeded(result)
-                onSuccess()
+                // The cipher only works if the TEE accepted the biometric for this key.
+                val verified = try {
+                    result.cryptoObject?.cipher?.doFinal(ByteArray(16)) != null
+                } catch (_: Exception) {
+                    false
+                }
+                if (verified) onSuccess() else onError("Biyometrik doğrulama donanım tarafından onaylanmadı")
             }
 
             override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
@@ -191,7 +210,45 @@ fun authenticateWithRealBiometrics(
         .setNegativeButtonText("PIN Kodu Kullan")
         .build()
 
-    prompt.authenticate(promptInfo)
+    prompt.authenticate(promptInfo, BiometricPrompt.CryptoObject(cipher))
+}
+
+private const val BIOMETRIC_VAULT_KEY = "zerochat_vault_biometric_key"
+
+/** AES key that can only be used right after a strong biometric authentication. */
+private fun biometricVaultCipher(): javax.crypto.Cipher {
+    val keyStore = java.security.KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+    val key = (keyStore.getKey(BIOMETRIC_VAULT_KEY, null) as? javax.crypto.SecretKey) ?: run {
+        val generator = javax.crypto.KeyGenerator.getInstance(
+            android.security.keystore.KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore"
+        )
+        val spec = android.security.keystore.KeyGenParameterSpec.Builder(
+            BIOMETRIC_VAULT_KEY,
+            android.security.keystore.KeyProperties.PURPOSE_ENCRYPT
+        )
+            .setBlockModes(android.security.keystore.KeyProperties.BLOCK_MODE_GCM)
+            .setEncryptionPaddings(android.security.keystore.KeyProperties.ENCRYPTION_PADDING_NONE)
+            .setKeySize(256)
+            .setUserAuthenticationRequired(true)
+            .setInvalidatedByBiometricEnrollment(true)
+            .apply {
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                    setUserAuthenticationParameters(0, android.security.keystore.KeyProperties.AUTH_BIOMETRIC_STRONG)
+                }
+            }
+            .build()
+        generator.init(spec)
+        generator.generateKey()
+    }
+    return javax.crypto.Cipher.getInstance("AES/GCM/NoPadding").apply {
+        init(javax.crypto.Cipher.ENCRYPT_MODE, key)
+    }
+}
+
+private fun resetBiometricVaultKey() {
+    runCatching {
+        java.security.KeyStore.getInstance("AndroidKeyStore").apply { load(null) }.deleteEntry(BIOMETRIC_VAULT_KEY)
+    }
 }
 
 /**

@@ -10,7 +10,11 @@ import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import com.example.crypto.AndroidKeystoreSecretWrapper
+import com.example.crypto.CryptoEngine
 import kotlinx.coroutines.flow.Flow
+import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
+import java.io.File
 
 /** Rooms moved into the PIN-protected secret vault, per account. */
 @Entity(tableName = "locked_rooms", primaryKeys = ["ownerUid", "roomId"])
@@ -233,23 +237,55 @@ interface LocalVaultDao {
         PendingOutboxEntity::class,
         CachedVaultMessageEntity::class
     ],
-    version = 5,
-    exportSchema = false
+    version = 1,
+    exportSchema = true
 )
 abstract class LocalVaultDatabase : RoomDatabase() {
     abstract fun vaultDao(): LocalVaultDao
 
     companion object {
+        /** Encrypted database file. The old plaintext file is deleted on first start. */
+        private const val DB_NAME = "zerochat_vault_encrypted.db"
+        private const val LEGACY_PLAINTEXT_DB = "zerochat_local_vault.db"
+        private const val PASSPHRASE_FILE = "zc_vault_db.key"
+
         @Volatile
         private var INSTANCE: LocalVaultDatabase? = null
 
         fun getInstance(context: Context): LocalVaultDatabase {
             return INSTANCE ?: synchronized(this) {
-                INSTANCE ?: Room.databaseBuilder(
-                    context.applicationContext,
-                    LocalVaultDatabase::class.java,
-                    "zerochat_local_vault.db"
-                ).fallbackToDestructiveMigration(true).build().also { INSTANCE = it }
+                INSTANCE ?: build(context.applicationContext).also { INSTANCE = it }
+            }
+        }
+
+        private fun build(app: Context): LocalVaultDatabase {
+            System.loadLibrary("sqlcipher")
+            deleteLegacyPlaintextDatabase(app)
+            val passphrase = loadOrCreatePassphrase(app)
+            return Room.databaseBuilder(app, LocalVaultDatabase::class.java, DB_NAME)
+                .openHelperFactory(SupportOpenHelperFactory(passphrase))
+                // Add Migration objects here for every future schema change; there is no
+                // destructive fallback, so local data (PINs, outbox) is never silently wiped.
+                .build()
+        }
+
+        /** 32 random bytes, stored encrypted with a non-exportable Android Keystore key. */
+        private fun loadOrCreatePassphrase(app: Context): ByteArray {
+            val wrapper = AndroidKeystoreSecretWrapper("zerochat_vault_db_wrap")
+            val file = File(app.noBackupFilesDir, PASSPHRASE_FILE)
+            if (file.exists()) {
+                runCatching { return wrapper.unwrap(file.readBytes()) }
+                // The Keystore key is gone (e.g. data restored to another device): start over.
+                app.deleteDatabase(DB_NAME)
+            }
+            val passphrase = CryptoEngine.randomBytes(32)
+            file.writeBytes(wrapper.wrap(passphrase))
+            return passphrase
+        }
+
+        private fun deleteLegacyPlaintextDatabase(app: Context) {
+            if (app.getDatabasePath(LEGACY_PLAINTEXT_DB).exists()) {
+                app.deleteDatabase(LEGACY_PLAINTEXT_DB)
             }
         }
     }

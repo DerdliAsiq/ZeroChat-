@@ -270,7 +270,9 @@ fun ZeroChatAuthenticatedShell(
     // Automatic Vault Lock when app moves to background (ON_STOP)
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) {
+            // Rotation also stops the activity; only lock when the app really leaves the screen.
+            val changingConfig = (context as? Activity)?.isChangingConfigurations == true
+            if (event == Lifecycle.Event.ON_STOP && !changingConfig) {
                 viewModel.onAppBackgrounded()
             }
         }

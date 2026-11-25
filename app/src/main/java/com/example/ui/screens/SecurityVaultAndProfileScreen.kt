@@ -48,9 +48,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import kotlinx.coroutines.launch
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -102,11 +104,11 @@ fun SecurityVaultAndProfileScreen(
     var displayNameInput by remember { mutableStateOf(myProfile?.displayName ?: "") }
     var bioInput by remember { mutableStateOf(myProfile?.bio ?: "") }
 
-    var normalPinInput by remember { mutableStateOf("1337") }
-    var panicPinInput by remember { mutableStateOf("9999") }
+    var normalPinInput by remember { mutableStateOf("") }
+    var panicPinInput by remember { mutableStateOf("") }
     var testPinInput by remember { mutableStateOf("") }
 
-    var backupPassword by remember { mutableStateOf("ZeroVault#2026") }
+    var backupPassword by remember { mutableStateOf("") }
     var importVaultInput by remember { mutableStateOf("") }
 
     LaunchedEffect(myProfile) {
@@ -140,20 +142,25 @@ fun SecurityVaultAndProfileScreen(
         }
     }
 
+    val fileScope = rememberCoroutineScope()
+
     // Physical .zcvault File Picker Launcher (OpenDocument)
     val openVaultFileLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri != null) {
-            try {
-                context.contentResolver.openInputStream(uri)?.use { input ->
-                    val content = input.bufferedReader(Charsets.UTF_8).readText().trim()
-                    if (content.isNotBlank()) {
-                        importVaultInput = content
-                        onImportEncryptedBackup(content, backupPassword)
-                    }
+            fileScope.launch {
+                val content = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    runCatching {
+                        context.contentResolver.openInputStream(uri)?.use { input ->
+                            input.bufferedReader(Charsets.UTF_8).readText().trim()
+                        }
+                    }.getOrNull()
                 }
-            } catch (_: Exception) {
+                if (!content.isNullOrBlank()) {
+                    importVaultInput = content
+                    onImportEncryptedBackup(content, backupPassword)
+                }
             }
         }
     }
@@ -545,6 +552,8 @@ fun SecurityVaultAndProfileScreen(
                 OutlinedTextField(
                     value = backupPassword,
                     onValueChange = { backupPassword = it },
+                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                    supportingText = { Text("En az 10 karakter. Parolayı unutursanız yedek açılamaz.") },
                     label = { Text("Yedekleme Parolası") },
                     singleLine = true,
                     modifier = Modifier
@@ -783,22 +792,30 @@ fun SecurityVaultAndProfileScreen(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
                         value = normalPinInput,
-                        onValueChange = { normalPinInput = it.take(8) },
+                        onValueChange = { normalPinInput = it.filter(Char::isDigit).take(12) },
                         label = { Text("Normal Kasa PIN") },
                         singleLine = true,
+                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.NumberPassword),
                         modifier = Modifier.weight(1f)
                     )
                     OutlinedTextField(
                         value = panicPinInput,
-                        onValueChange = { panicPinInput = it.take(8) },
+                        onValueChange = { panicPinInput = it.filter(Char::isDigit).take(12) },
                         label = { Text("Acil Gizleme PIN") },
                         singleLine = true,
+                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.NumberPassword),
                         modifier = Modifier.weight(1f)
                     )
                 }
                 Spacer(modifier = Modifier.height(10.dp))
                 Button(
-                    onClick = { onUpdateVaultPins(normalPinInput, panicPinInput) },
+                    onClick = {
+                        onUpdateVaultPins(normalPinInput, panicPinInput)
+                        normalPinInput = ""
+                        panicPinInput = ""
+                    },
                     colors = ButtonDefaults.buttonColors(
                         containerColor = AmberTimerWarning,
                         contentColor = Color.Black
@@ -816,9 +833,11 @@ fun SecurityVaultAndProfileScreen(
                 ) {
                     OutlinedTextField(
                         value = testPinInput,
-                        onValueChange = { testPinInput = it.take(8) },
+                        onValueChange = { testPinInput = it.filter(Char::isDigit).take(12) },
                         label = { Text("PIN Kodu Girin") },
                         singleLine = true,
+                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.NumberPassword),
                         modifier = Modifier.weight(1f)
                     )
                     Button(

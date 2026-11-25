@@ -249,18 +249,15 @@ fun ChatListAndDiscoveryScreen(
                             Icon(
                                 imageVector = if (isVaultUnlocked) Icons.Default.LockOpen else Icons.Default.Lock,
                                 contentDescription = "Gizli Kasa PIN",
-                                tint = if (isPanicModeActive) BurnCoralRed else NeonCyberGreen,
+                                tint = NeonCyberGreen,
                                 modifier = Modifier.size(16.dp)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = when {
-                                    isPanicModeActive -> "Panik Modu"
-                                    isVaultUnlocked -> "Kasa Açık"
-                                    else -> "PIN Kasa"
-                                },
+                                // Panic mode deliberately looks exactly like a locked vault.
+                                text = if (isVaultUnlocked) "Kasa Açık" else "PIN Kasa",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = if (isPanicModeActive) BurnCoralRed else NeonCyberGreen
+                                color = NeonCyberGreen
                             )
                         }
                     }
@@ -301,41 +298,6 @@ fun ChatListAndDiscoveryScreen(
                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
                         ) {
                             Text("Şimdi Gönder", style = MaterialTheme.typography.labelSmall, color = NeonCyberGreen)
-                        }
-                    }
-                }
-            }
-
-            if (isPanicModeActive) {
-                Spacer(modifier = Modifier.height(10.dp))
-                Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.errorContainer
-                    ),
-                    border = BorderStroke(1.dp, BurnCoralRed),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier.padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.WarningAmber,
-                            contentDescription = null,
-                            tint = BurnCoralRed
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = stringResource(R.string.panic_mode_active_banner),
-                                style = MaterialTheme.typography.labelLarge,
-                                color = MaterialTheme.colorScheme.onErrorContainer
-                            )
-                            Text(
-                                text = "Normal sohbetlerinize dönmek için PIN Kasa butonuna dokunup gerçek PIN'inizi (varsayılan: 1337) girin.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.85f)
-                            )
                         }
                     }
                 }
@@ -1542,7 +1504,7 @@ private fun LockedVaultPromptCard(onUnlockClick: () -> Unit) {
             )
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "Gizli sohbetleri görüntülemek için Kasa PIN kodunuzu (varsayılan: 1337) veya acil durum gizleme için Panik PIN kodunuzu (varsayılan: 9999) girin.",
+                text = "Gizli sohbetleri görüntülemek için kasa PIN kodunuzu girin. PIN belirlemediyseniz Profil ve Kasa sekmesinden belirleyin.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -1641,16 +1603,18 @@ private fun VaultPinEntryDialog(
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = "Normal Kasa PIN (Varsayılan: 1337) gizli arşivleri açar.\nSahte Panik PIN (Varsayılan: 9999) acil durum gizleme modunu devreye sokar.",
+                    text = "Normal PIN gizli sohbetleri açar. Panik PIN tüm sohbetleri gizler; panik modundan yalnızca normal PIN ile çıkılır.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(12.dp))
                 OutlinedTextField(
                     value = pinInput,
-                    onValueChange = { pinInput = it.take(8) },
+                    onValueChange = { pinInput = it.filter(Char::isDigit).take(12) },
                     label = { Text("PIN Kodu") },
                     singleLine = true,
+                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.NumberPassword),
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("pin_dialog_input")
@@ -1693,8 +1657,12 @@ private fun VaultPinEntryDialog(
                     Button(
                         onClick = {
                             val result = onVerifyPin(pinInput)
-                            if (result == "INVALID") {
-                                feedback = "Hatalı PIN kodu!"
+                            pinInput = ""
+                            feedback = when (result) {
+                                "INVALID" -> "Hatalı PIN kodu!"
+                                "LOCKED_OUT" -> "Çok fazla hatalı deneme, lütfen bekleyin"
+                                "NOT_SET" -> "Önce Profil ve Kasa sekmesinden PIN belirleyin"
+                                else -> null
                             }
                         },
                         colors = ButtonDefaults.buttonColors(

@@ -93,6 +93,9 @@ secrets {
 
 googleServices { missingGoogleServicesStrategy = MissingGoogleServicesStrategy.WARN }
 
+// Room schema history, used for migrations of the encrypted local vault database.
+ksp { arg("room.schemaLocation", "$projectDir/schemas") }
+
 dependencies {
   implementation(platform(libs.androidx.compose.bom))
   implementation(platform(libs.firebase.bom))
@@ -104,6 +107,8 @@ dependencies {
   implementation(libs.androidx.camera.view)
   implementation(libs.androidx.biometric)
   implementation(libs.zxing.core)
+  implementation(libs.sqlcipher.android)
+  implementation(libs.androidx.sqlite)
   implementation(libs.androidx.compose.material.icons.core)
   implementation(libs.androidx.compose.material.icons.extended)
   implementation(libs.androidx.compose.material3)
