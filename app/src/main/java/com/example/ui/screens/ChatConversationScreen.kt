@@ -150,8 +150,6 @@ import com.example.util.encodeImageForSending
 import com.example.util.MAX_VOICE_NOTE_SECONDS
 import com.example.util.MAX_ATTACHMENT_BYTES
 import com.example.util.decodeBase64DataUriToImageBitmap
-import com.example.util.encodeDocumentUriToBase64
-import com.example.util.encodeUriToEncryptedDataUri
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -465,7 +463,7 @@ fun ChatConversationScreen(
                 ) {
                     Icon(
                         imageVector = if (room.isGroup) Icons.Default.Group else Icons.Default.Key,
-                        contentDescription = "Grup Üyeleri ve Anahtar Yenileme",
+                        contentDescription = if (room.isGroup) "Grup Üyeleri ve Anahtar Yenileme" else "Sohbet Güvenliği ve Anahtar Yenileme",
                         tint = CyberCyan
                     )
                 }
@@ -495,26 +493,28 @@ fun ChatConversationScreen(
                     )
                 }
 
-                IconButton(
-                    onClick = { onStartCall("AUDIO") },
-                    modifier = Modifier.testTag("start_audio_call_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Call,
-                        contentDescription = stringResource(R.string.call_start_audio),
-                        tint = NeonCyberGreen
-                    )
-                }
+                if (!room.isGroup) {
+                    IconButton(
+                        onClick = { onStartCall("AUDIO") },
+                        modifier = Modifier.testTag("start_audio_call_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Call,
+                            contentDescription = stringResource(R.string.call_start_audio),
+                            tint = NeonCyberGreen
+                        )
+                    }
 
-                IconButton(
-                    onClick = { onStartCall("VIDEO") },
-                    modifier = Modifier.testTag("start_video_call_button")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Videocam,
-                        contentDescription = stringResource(R.string.call_start_video),
-                        tint = CyberCyan
-                    )
+                    IconButton(
+                        onClick = { onStartCall("VIDEO") },
+                        modifier = Modifier.testTag("start_video_call_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Videocam,
+                            contentDescription = stringResource(R.string.call_start_video),
+                            tint = CyberCyan
+                        )
+                    }
                 }
             }
         }
@@ -1625,7 +1625,7 @@ private fun EncryptedMessageBubble(
                                     color = BurnCoralRed
                                 )
                                 Text(
-                                    text = "Açmak için dokunun • Kapatıldığında anında imha edilir",
+                                    text = "Açmak için dokunun • Kapatıldığında bu cihazdan kaldırılır",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -1838,82 +1838,107 @@ private fun EncryptedMessageBubble(
                         }
 
                         "LOCATION" -> {
-                            val (lat, lng, label) = remember(message.encryptedMeta, message.decryptedText) {
-                                try {
+                            val locationData = remember(message.encryptedMeta, message.decryptedText) {
+                                runCatching {
                                     val obj = org.json.JSONObject(message.encryptedMeta)
-                                    Triple(
-                                        obj.optDouble("lat", 41.0082),
-                                        obj.optDouble("lng", 28.9784),
-                                        obj.optString("label", "Şifreli GPS Konumu")
-                                    )
-                                } catch (_: Exception) {
-                                    Triple(41.0082, 28.9784, message.decryptedText)
-                                }
+                                    if (obj.has("lat") && obj.has("lng")) {
+                                        val parsedLat = obj.getDouble("lat")
+                                        val parsedLng = obj.getDouble("lng")
+                                        if (!parsedLat.isNaN() && !parsedLng.isNaN()) {
+                                            Triple(
+                                                parsedLat,
+                                                parsedLng,
+                                                obj.optString("label", "Konum").ifBlank { "Konum" }
+                                            )
+                                        } else {
+                                            null
+                                        }
+                                    } else {
+                                        null
+                                    }
+                                }.getOrNull()
                             }
-                            Surface(
-                                shape = RoundedCornerShape(12.dp),
-                                color = ObsidianBlack,
-                                border = BorderStroke(1.dp, NeonCyberGreen.copy(alpha = 0.65f)),
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { onOpenLocationInMaps(lat, lng, label) }
-                                    .testTag("open_location_maps_${message.id}")
-                            ) {
-                                Column(modifier = Modifier.padding(12.dp)) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        modifier = Modifier.fillMaxWidth()
-                                    ) {
+                            if (locationData == null) {
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = ObsidianBlack,
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = "📍 Konum bilgisi okunamadı",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(12.dp)
+                                    )
+                                }
+                            } else {
+                                val (lat, lng, label) = locationData
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = ObsidianBlack,
+                                    border = BorderStroke(1.dp, NeonCyberGreen.copy(alpha = 0.65f)),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onOpenLocationInMaps(lat, lng, label) }
+                                        .testTag("open_location_maps_${message.id}")
+                                ) {
+                                    Column(modifier = Modifier.padding(12.dp)) {
                                         Row(
                                             verticalAlignment = Alignment.CenterVertically,
-                                            modifier = Modifier.weight(1f)
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Row(
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Icon(
+                                                    imageVector = Icons.Default.LocationOn,
+                                                    contentDescription = null,
+                                                    tint = BurnCoralRed,
+                                                    modifier = Modifier.size(26.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(8.dp))
+                                                Column {
+                                                    Text(
+                                                        text = label,
+                                                        style = MaterialTheme.typography.titleSmall,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = NeonCyberGreen
+                                                    )
+                                                    Text(
+                                                        text = String.format(Locale.US, "GPS: %.5f, %.5f", lat, lng),
+                                                        fontFamily = JetBrainsMonoFontFamily,
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = CyberCyan
+                                                    )
+                                                }
+                                            }
+                                        }
+                                        Spacer(modifier = Modifier.height(8.dp))
+                                        Button(
+                                            onClick = { onOpenLocationInMaps(lat, lng, label) },
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = NeonCyberGreen,
+                                                contentColor = Color(0xFF002110)
+                                            ),
+                                            shape = RoundedCornerShape(10.dp),
+                                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                            modifier = Modifier.fillMaxWidth()
                                         ) {
                                             Icon(
                                                 imageVector = Icons.Default.LocationOn,
                                                 contentDescription = null,
-                                                tint = BurnCoralRed,
-                                                modifier = Modifier.size(26.dp)
+                                                modifier = Modifier.size(16.dp)
                                             )
-                                            Spacer(modifier = Modifier.width(8.dp))
-                                            Column {
-                                                Text(
-                                                    text = label,
-                                                    style = MaterialTheme.typography.titleSmall,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = NeonCyberGreen
-                                                )
-                                                Text(
-                                                    text = String.format(Locale.US, "GPS: %.5f, %.5f", lat, lng),
-                                                    fontFamily = JetBrainsMonoFontFamily,
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = CyberCyan
-                                                )
-                                            }
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                text = "Haritalarda Aç (GPS Navigasyon)",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                fontWeight = FontWeight.Bold
+                                            )
                                         }
-                                    }
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                    Button(
-                                        onClick = { onOpenLocationInMaps(lat, lng, label) },
-                                        colors = ButtonDefaults.buttonColors(
-                                            containerColor = NeonCyberGreen,
-                                            contentColor = Color(0xFF002110)
-                                        ),
-                                        shape = RoundedCornerShape(10.dp),
-                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                                        modifier = Modifier.fillMaxWidth()
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.Default.LocationOn,
-                                            contentDescription = null,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text(
-                                            text = "Haritalarda Aç (GPS Navigasyon)",
-                                            style = MaterialTheme.typography.labelMedium,
-                                            fontWeight = FontWeight.Bold
-                                        )
                                     }
                                 }
                             }
@@ -2233,7 +2258,7 @@ private fun ScheduleEncryptedMessageDialog(
                 }
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = "Mesajınız cihazda şifrelenerek yerel kasaya alınır ve belirlediğiniz süre sonunda otomatik olarak P2P ağa iletilir.",
+                    text = "Mesajınız bu cihazda güvenle saklanır ve belirlediğiniz süre sonunda otomatik olarak gönderilir.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -2400,60 +2425,62 @@ private fun GroupManagementAndKeyRotationDialog(
         ) {
             Column(modifier = Modifier.padding(20.dp)) {
                 Text(
-                    text = "Grup Üyeleri & Anahtar Rotasyonu",
+                    text = if (room.isGroup) "Grup Üyeleri & Güvenlik Anahtarı" else "Sohbet Güvenliği & Anahtar",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
-                Spacer(modifier = Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = titleInput,
-                    onValueChange = { titleInput = it },
-                    label = { Text("Sohbet / Grup Başlığı") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(modifier = Modifier.height(10.dp))
-                Text(
-                    text = "Üyeler (@kullanici_adi):",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = CyberCyan
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(140.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    items(directoryPeers, key = { it.userId }) { peer ->
-                        val isChecked = selectedUids.contains(peer.userId)
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    if (isChecked) {
-                                        selectedUids.remove(peer.userId)
-                                    } else {
-                                        selectedUids.add(peer.userId)
+                if (room.isGroup) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = titleInput,
+                        onValueChange = { titleInput = it },
+                        label = { Text("Grup Başlığı") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = "Üyeler (@kullanici_adi):",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = CyberCyan
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(140.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        items(directoryPeers, key = { it.userId }) { peer ->
+                            val isChecked = selectedUids.contains(peer.userId)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        if (isChecked) {
+                                            selectedUids.remove(peer.userId)
+                                        } else {
+                                            selectedUids.add(peer.userId)
+                                        }
                                     }
-                                }
-                                .padding(vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Checkbox(
-                                checked = isChecked,
-                                onCheckedChange = { checked ->
-                                    if (checked) {
-                                        if (!selectedUids.contains(peer.userId)) selectedUids.add(peer.userId)
-                                    } else {
-                                        selectedUids.remove(peer.userId)
+                                    .padding(vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(
+                                    checked = isChecked,
+                                    onCheckedChange = { checked ->
+                                        if (checked) {
+                                            if (!selectedUids.contains(peer.userId)) selectedUids.add(peer.userId)
+                                        } else {
+                                            selectedUids.remove(peer.userId)
+                                        }
                                     }
-                                }
-                            )
-                            Text(
-                                text = "@${peer.username} (${peer.displayName})",
-                                style = MaterialTheme.typography.bodyMedium
-                            )
+                                )
+                                Text(
+                                    text = "@${peer.username} (${peer.displayName})",
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                            }
                         }
                     }
                 }
@@ -2511,18 +2538,20 @@ private fun GroupManagementAndKeyRotationDialog(
                     OutlinedButton(onClick = onDismiss) {
                         Text("Kapat")
                     }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Button(
-                        onClick = {
-                            val chosenPeers = directoryPeers.filter { selectedUids.contains(it.userId) }
-                            onSaveMembersAndTitle(titleInput, chosenPeers)
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = NeonCyberGreen,
-                            contentColor = Color(0xFF002110)
-                        )
-                    ) {
-                        Text("Üyeleri Güncelle", fontWeight = FontWeight.Bold)
+                    if (room.isGroup) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = {
+                                val chosenPeers = directoryPeers.filter { selectedUids.contains(it.userId) }
+                                onSaveMembersAndTitle(titleInput, chosenPeers)
+                            },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = NeonCyberGreen,
+                                contentColor = Color(0xFF002110)
+                            )
+                        ) {
+                            Text("Üyeleri Güncelle", fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }

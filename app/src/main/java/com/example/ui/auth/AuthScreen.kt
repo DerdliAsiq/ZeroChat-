@@ -344,7 +344,7 @@ fun AuthScreen(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "ZERO-KNOWLEDGE PROTOCOL v3.0",
+                            text = "UÇTAN UCA ŞİFRELİ İLETİŞİM",
                             style = MaterialTheme.typography.labelSmall,
                             color = NeonCyberGreen
                         )
@@ -509,20 +509,20 @@ fun AuthScreen(
 
             FeatureSpecCard(
                 icon = Icons.Default.Lock,
-                title = "Gerçek AES-256-GCM Uçtan Uca Şifreleme",
-                description = "Her mesaj cihazınızda şifrelenir; şifreli zarfları (Ciphertext & IV) istediğiniz an denetleyebilirsiniz."
+                title = "Uçtan Uca Şifreli Mesajlaşma",
+                description = "Her mesaj cihazınızda şifrelenir; güvenlik kodunu istediğiniz an doğrulayabilirsiniz."
             )
             Spacer(modifier = Modifier.height(8.dp))
             FeatureSpecCard(
                 icon = Icons.Default.Key,
-                title = "@kullanici_adi ile Küresel P2P Keşif",
+                title = "@kullanici_adi ile Hızlı Eşleşme",
                 description = "Telefon numarası paylaşmadan kullanıcı adı veya canlı kamera QR kodu ile eşleşin ve anında şifreli mesajlaşın."
             )
             Spacer(modifier = Modifier.height(8.dp))
             FeatureSpecCard(
                 icon = Icons.Default.VisibilityOff,
                 title = "Biyometrik Kasa ve Süreli Mesajlar",
-                description = "Gerçek parmak izi sensörü ile korunan gizli kasa ve okunduktan sonra kendini imha eden mesajlar."
+                description = "Parmak izi kilidiyle korunan gizli kasa ve belirlediğiniz sürede silinen mesajlar."
             )
             Spacer(modifier = Modifier.height(12.dp))
         }

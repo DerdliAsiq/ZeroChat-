@@ -338,7 +338,7 @@ fun RealCameraQrScannerView(
     var lensFacing by remember { mutableIntStateOf(CameraSelector.LENS_FACING_BACK) }
     var isTorchOn by remember { mutableStateOf(false) }
     var boundCamera by remember { mutableStateOf<Camera?>(null) }
-    var statusText by remember { mutableStateOf("Kamerayı karşı düğümün ZeroChat QR koduna doğrultun...") }
+    var statusText by remember { mutableStateOf("Kamerayı karşınızdaki kişinin ZeroChat QR koduna doğrultun...") }
     val hasDispatchedResult = remember { AtomicBoolean(false) }
     val qrScope = rememberCoroutineScope()
 
@@ -823,7 +823,7 @@ fun RealCameraPhotoCaptureDialog(
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Text(
-                            text = "Fotoğraf çekip anında AES-256-GCM ile şifrelemek için Kamera izni gereklidir.",
+                            text = "Fotoğraf çekip şifreli olarak göndermek için Kamera izni gereklidir.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center
@@ -949,7 +949,7 @@ fun RealCameraPhotoCaptureDialog(
                         } else {
                             Icon(Icons.Default.CameraAlt, contentDescription = null)
                             Spacer(modifier = Modifier.width(8.dp))
-                            Text("Fotoğrafı Çek ve AES-256 İle Şifrele", fontWeight = FontWeight.Bold)
+                            Text("Fotoğrafı Çek ve Gönder", fontWeight = FontWeight.Bold)
                         }
                     }
                 }

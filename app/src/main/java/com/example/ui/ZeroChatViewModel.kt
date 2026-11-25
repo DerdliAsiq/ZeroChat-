@@ -4,7 +4,6 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.crypto.CryptoEngine
-import com.example.crypto.HardwareKeyStatus
 import com.example.data.local.CachedVaultMessageEntity
 import com.example.data.local.HiddenRoomEntity
 import com.example.data.local.LocalVaultDao
@@ -42,6 +41,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -87,11 +87,14 @@ class ZeroChatViewModel(
 
     // ------------------------------------------------------------------ simple UI state
 
-    private val _hardwareKeyStatus = MutableStateFlow<HardwareKeyStatus?>(null)
-    val hardwareKeyStatus: StateFlow<HardwareKeyStatus?> = _hardwareKeyStatus.asStateFlow()
-
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
+    private val _isSearchingUsers = MutableStateFlow(false)
+    val isSearchingUsers: StateFlow<Boolean> = _isSearchingUsers.asStateFlow()
+
+    private val _searchError = MutableStateFlow<String?>(null)
+    val searchError: StateFlow<String?> = _searchError.asStateFlow()
 
     private val _inChatSearchQuery = MutableStateFlow("")
     val inChatSearchQuery: StateFlow<String> = _inChatSearchQuery.asStateFlow()
@@ -277,9 +280,12 @@ class ZeroChatViewModel(
     ) { profiles, search, query, panic ->
         if (panic) return@combine UiState.Success(emptyList<UserProfile>())
         val q = query.trim().removePrefix("@").lowercase(Locale.ROOT)
+        val qHandle = ZeroChatRepository.sanitizeHandle(query)
         val all = (profiles.values + search).distinctBy { it.userId }.filter { it.userId != currentUserId }
         val filtered = if (q.isEmpty()) all else all.filter {
-            it.username.lowercase(Locale.ROOT).contains(q) || it.displayName.lowercase(Locale.ROOT).contains(q)
+            it.username.lowercase(Locale.ROOT).contains(q) ||
+                (qHandle.isNotEmpty() && it.username.lowercase(Locale.ROOT).contains(qHandle)) ||
+                it.displayName.lowercase(Locale.ROOT).contains(q)
         }
         UiState.Success(filtered.sortedBy { it.username }) as UiState<List<UserProfile>>
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
@@ -346,7 +352,12 @@ class ZeroChatViewModel(
     )
 
     private val decryptedRoomMessages: StateFlow<List<DecryptedMessageItem>> = _selectedRoom
-        .distinctUntilChanged { a, b -> a?.id == b?.id && a?.roomKeyHint == b?.roomKeyHint }
+        .distinctUntilChanged { a, b ->
+            a?.id == b?.id &&
+                a?.keyVersion == b?.keyVersion &&
+                a?.participantUids == b?.participantUids &&
+                a?.roomKeyHint == b?.roomKeyHint
+        }
         .flatMapLatest { room ->
             if (room == null) return@flatMapLatest flowOf(emptyList())
             combine(
@@ -674,8 +685,7 @@ class ZeroChatViewModel(
     private fun bootstrapIdentity() {
         viewModelScope.launch {
             val identity = withContext(Dispatchers.Default) { runCatching { repository.identity() } }
-            identity.onSuccess { _hardwareKeyStatus.value = it.status() }
-                .onFailure { banner("Kimlik anahtarları yüklenemedi: ${it.userMessage()}") }
+            identity.onFailure { banner("Kimlik anahtarları yüklenemedi: ${it.userMessage()}") }
             repository.ensureProfile(preferredHandle, displayNameHint)
                 .onSuccess { _myProfile.value = it }
                 .onFailure { banner("Profil oluşturulamadı: ${it.userMessage()}") }
@@ -691,22 +701,66 @@ class ZeroChatViewModel(
         }
     }
 
+    private var immediateSearchJob: Job? = null
+
     private fun observeSearch() {
         viewModelScope.launch {
             _searchQuery
-                .map { it.trim().removePrefix("@").lowercase(Locale.ROOT) }
+                .map { it.trim().removePrefix("@") }
                 .distinctUntilChanged()
-                .debounce(300)
-                .collect { q ->
-                    if (q.length < 2) {
+                .onEach { q ->
+                    immediateSearchJob?.cancel()
+                    _searchError.value = null
+                    val clean = ZeroChatRepository.sanitizeHandle(q)
+                    if (q.length < 2 && clean.length < 2) {
+                        _isSearchingUsers.value = false
                         _searchResults.value = emptyList()
                     } else {
-                        repository.searchUsers(q)
-                            .onSuccess { _searchResults.value = it }
-                            .onFailure { Log.w(TAG, "search failed", it) }
+                        _isSearchingUsers.value = true
                     }
                 }
+                .debounce(300)
+                .collectLatest { q ->
+                    executeUserSearch(q)
+                }
         }
+    }
+
+    fun searchUsersNow() {
+        val q = _searchQuery.value.trim().removePrefix("@")
+        val clean = ZeroChatRepository.sanitizeHandle(q)
+        if (q.length < 2 && clean.length < 2) {
+            _isSearchingUsers.value = false
+            _searchError.value = null
+            _searchResults.value = emptyList()
+            return
+        }
+        immediateSearchJob?.cancel()
+        immediateSearchJob = viewModelScope.launch {
+            executeUserSearch(q)
+        }
+    }
+
+    private suspend fun executeUserSearch(q: String) {
+        val clean = ZeroChatRepository.sanitizeHandle(q)
+        if (q.length < 2 && clean.length < 2) {
+            _isSearchingUsers.value = false
+            _searchError.value = null
+            _searchResults.value = emptyList()
+            return
+        }
+        _isSearchingUsers.value = true
+        _searchError.value = null
+        repository.searchUsers(q)
+            .onSuccess {
+                _searchError.value = null
+                _searchResults.value = it
+            }
+            .onFailure { err ->
+                Log.w(TAG, "search failed", err)
+                _searchError.value = "Kullanıcı araması yapılamadı: ${err.userMessage()}"
+            }
+        _isSearchingUsers.value = false
     }
 
     /** Keeps the open room in sync with the live list and raises message notifications. */
@@ -1503,14 +1557,23 @@ class ZeroChatViewModel(
 
     /** Starts a call with the peer of an existing, accepted direct conversation. */
     fun startP2PCall(calleeUid: String, calleeUsername: String, callType: String) {
-        val room = (roomsRaw.value as? UiState.Success)?.data?.firstOrNull {
-            !it.isGroup && it.participantUids.contains(calleeUid) && it.participantUids.contains(currentUserId)
-        }
-        if (room == null) {
-            banner("@$calleeUsername ile aramak için önce sohbet başlatın")
-            return
-        }
         viewModelScope.launch {
+            val resolvedUid = if (calleeUid.isBlank() || calleeUid.startsWith("peer_")) {
+                profilesByUid.value.values.firstOrNull {
+                    it.username.equals(calleeUsername.trim().removePrefix("@"), ignoreCase = true)
+                }?.userId ?: repository.findUserByHandle(calleeUsername).getOrNull()?.userId
+            } else {
+                calleeUid
+            }
+            val room = resolvedUid?.let { targetUid ->
+                (roomsRaw.value as? UiState.Success)?.data?.firstOrNull {
+                    !it.isGroup && it.participantUids.contains(targetUid) && it.participantUids.contains(currentUserId)
+                }
+            }
+            if (room == null) {
+                banner("@${calleeUsername.removePrefix("@")} ile aramak için önce sohbet başlatın")
+                return@launch
+            }
             repository.startCall(room, callType)
                 .onSuccess {
                     outgoingSeq = 0L
@@ -1680,7 +1743,7 @@ class ZeroChatViewModel(
 
     // ------------------------------------------------------------------ backups
 
-    fun exportEncryptedBackup(password: String) {
+    fun exportEncryptedBackup(password: String, onReady: ((String) -> Unit)? = null) {
         if (password.length < CryptoEngine.MIN_BACKUP_PASSWORD_LENGTH) {
             banner("Yedek parolası en az ${CryptoEngine.MIN_BACKUP_PASSWORD_LENGTH} karakter olmalı")
             return
@@ -1709,6 +1772,7 @@ class ZeroChatViewModel(
             val encrypted = withContext(Dispatchers.Default) { CryptoEngine.encryptBackupArchive(root, password) }
             _exportedVaultBackupText.value = encrypted
             banner("${messages.size} mesaj parolayla şifrelenerek dışa aktarıldı")
+            onReady?.invoke(encrypted)
         }
     }
 

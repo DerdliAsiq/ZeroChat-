@@ -85,7 +85,6 @@ import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.auth
-import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -204,8 +203,9 @@ fun ZeroChatAuthenticatedShell(
     }
 
     val myProfile by viewModel.myProfile.collectAsStateWithLifecycle()
-    val hardwareKeyStatus by viewModel.hardwareKeyStatus.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
+    val isSearchingUsers by viewModel.isSearchingUsers.collectAsStateWithLifecycle()
+    val searchError by viewModel.searchError.collectAsStateWithLifecycle()
     val inChatSearchQuery by viewModel.inChatSearchQuery.collectAsStateWithLifecycle()
     val directoryState by viewModel.directoryUsersState.collectAsStateWithLifecycle()
     val roomsState by viewModel.roomsState.collectAsStateWithLifecycle()
@@ -510,6 +510,9 @@ fun ZeroChatAuthenticatedShell(
                             myProfile = myProfile,
                             searchQuery = searchQuery,
                             onSearchQueryChange = viewModel::updateSearchQuery,
+                            isSearchingUsers = isSearchingUsers,
+                            searchError = searchError,
+                            onSearchSubmit = viewModel::searchUsersNow,
                             directoryState = directoryState,
                             roomsState = roomsState,
                             lockedRoomIds = lockedRoomIds,
@@ -564,7 +567,6 @@ fun ZeroChatAuthenticatedShell(
                     "VAULT" -> {
                         SecurityVaultAndProfileScreen(
                             myProfile = myProfile,
-                            hardwareKeyStatus = hardwareKeyStatus,
                             isVaultUnlocked = isVaultUnlocked,
                             isPanicModeActive = isPanicModeActive,
                             isScreenShieldEnabled = isScreenShieldEnabled,

@@ -28,6 +28,7 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.snapshots
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOf
@@ -131,7 +132,8 @@ class ZeroChatRepository(
             val keysChanged = existing == null ||
                 existing.publicKey != id.publicKey ||
                 existing.signingKey != id.signingKey ||
-                existing.protocolVersion < CryptoEngine.PROTOCOL_VERSION
+                existing.protocolVersion < CryptoEngine.PROTOCOL_VERSION ||
+                existing.displayName.isBlank()
             if (existing != null && claimedByMe && !keysChanged) return@firestoreCatching existing
 
             val batch = db.batch()
@@ -157,17 +159,18 @@ class ZeroChatRepository(
                     )
                 )
             } else {
-                batch.update(
-                    ref,
-                    mapOf(
-                        "username" to handle,
-                        "publicKey" to id.publicKey,
-                        "signingKey" to id.signingKey,
-                        "safetyFingerprint" to id.fingerprint,
-                        "protocolVersion" to CryptoEngine.PROTOCOL_VERSION.toLong(),
-                        "updatedAt" to FieldValue.serverTimestamp()
-                    )
+                val updateFields = mutableMapOf<String, Any>(
+                    "username" to handle,
+                    "publicKey" to id.publicKey,
+                    "signingKey" to id.signingKey,
+                    "safetyFingerprint" to id.fingerprint,
+                    "protocolVersion" to CryptoEngine.PROTOCOL_VERSION.toLong(),
+                    "updatedAt" to FieldValue.serverTimestamp()
                 )
+                if (existing.displayName.isBlank()) {
+                    updateFields["displayName"] = fallbackDisplayName?.trim()?.take(MAX_DISPLAY_NAME)?.ifBlank { null } ?: handle
+                }
+                batch.update(ref, updateFields)
             }
             batch.commit().await()
             users.document(me).get().await().toModel<UserProfile>()!!.also { profileCache[me] = it }
@@ -243,31 +246,112 @@ class ZeroChatRepository(
         return users.document(userId).get().await().toModel<UserProfile>()?.also { profileCache[userId] = it }
     }
 
-    /** Prefix search over claimed handles; returns profiles. */
+    /** Searches by handle across both `usernames` claims and `users` profiles (exact + prefix). */
     suspend fun searchUsers(rawQuery: String): Result<List<UserProfile>> =
-        firestoreCatching(OperationType.LIST, "usernames") {
+        firestoreCatching(OperationType.LIST, "users") {
+            val me = uid
+            val trimmedNoAt = rawQuery.trim().removePrefix("@")
+            val lowerNoAt = trimmedNoAt.lowercase(Locale.ROOT)
             val prefix = sanitizeHandle(rawQuery)
-            if (prefix.length < 2) return@firestoreCatching emptyList()
-            val snap = usernames
-                .orderBy(FieldPath.documentId())
-                .startAt(prefix)
-                .endAt(prefix + "")
-                .limit(20)
-                .get()
-                .await()
-            val ids = snap.documents.mapNotNull { it.getString("uid") }.distinct().filter { it != uid }
-            ids.chunked(30).flatMap { chunk ->
-                users.whereIn(FieldPath.documentId(), chunk).limit(30).get().await()
-                    .documents.mapNotNull { it.toModel<UserProfile>() }
-            }.onEach { profileCache[it.userId] = it }
+            if (prefix.length < 2 && lowerNoAt.length < 2) return@firestoreCatching emptyList()
+
+            val found = LinkedHashMap<String, UserProfile>()
+            var successCount = 0
+            var lastError: Throwable? = null
+
+            suspend fun runPart(block: suspend () -> Unit) {
+                try {
+                    block()
+                    successCount++
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    lastError = e
+                }
+            }
+
+            if (isValidHandle(prefix)) {
+                runPart {
+                    val owner = usernames.document(prefix).get().await().getString("uid")
+                    if (!owner.isNullOrBlank() && owner != me) {
+                        getProfile(owner, forceRefresh = true)?.let { found[it.userId] = it }
+                    }
+                }
+            }
+
+            val exactCandidates = listOf(prefix, lowerNoAt, trimmedNoAt).filter { it.length >= 2 }.distinct()
+            for (candidate in exactCandidates) {
+                runPart {
+                    users.whereEqualTo("username", candidate).limit(10).get().await()
+                        .documents.mapNotNull { it.toModel<UserProfile>() }
+                        .filter { it.userId != me }
+                        .forEach { found[it.userId] = it }
+                }
+            }
+
+            if (prefix.length >= 2) {
+                runPart {
+                    users.orderBy("username")
+                        .startAt(prefix)
+                        .endAt(prefix + "\uf8ff")
+                        .limit(20)
+                        .get()
+                        .await()
+                        .documents.mapNotNull { it.toModel<UserProfile>() }
+                        .filter { it.userId != me }
+                        .forEach { found[it.userId] = it }
+                }
+                runPart {
+                    val snap = usernames
+                        .orderBy(FieldPath.documentId())
+                        .startAt(prefix)
+                        .endAt(prefix + "\uf8ff")
+                        .limit(20)
+                        .get()
+                        .await()
+                    val missingIds = snap.documents
+                        .mapNotNull { it.getString("uid") }
+                        .distinct()
+                        .filter { it != me && !found.containsKey(it) }
+                    missingIds.chunked(30).forEach { chunk ->
+                        val docs = try {
+                            users.whereIn(FieldPath.documentId(), chunk).limit(30).get().await()
+                                .documents.mapNotNull { it.toModel<UserProfile>() }
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (_: Throwable) {
+                            chunk.mapNotNull { id -> runCatching { getProfile(id, forceRefresh = true) }.getOrNull() }
+                        }
+                        docs.filter { it.userId != me }.forEach { found[it.userId] = it }
+                    }
+                }
+            }
+
+            if (successCount == 0 && lastError != null) throw lastError!!
+            found.values.onEach { profileCache[it.userId] = it }.toList()
         }
 
     suspend fun findUserByHandle(rawHandle: String): Result<UserProfile?> =
         firestoreCatching(OperationType.GET, "usernames/{handle}") {
+            val trimmedNoAt = rawHandle.trim().removePrefix("@")
+            val lowerNoAt = trimmedNoAt.lowercase(Locale.ROOT)
             val handle = sanitizeHandle(rawHandle)
-            if (!isValidHandle(handle)) return@firestoreCatching null
-            val owner = usernames.document(handle).get().await().getString("uid") ?: return@firestoreCatching null
-            getProfile(owner, forceRefresh = true)
+            if (isValidHandle(handle)) {
+                val owner = usernames.document(handle).get().await().getString("uid")
+                if (!owner.isNullOrBlank()) {
+                    getProfile(owner, forceRefresh = true)?.let { return@firestoreCatching it }
+                }
+            }
+            val candidates = listOf(handle, lowerNoAt, trimmedNoAt).filter { it.length >= 2 }.distinct()
+            for (candidate in candidates) {
+                val doc = users.whereEqualTo("username", candidate).limit(1).get().await()
+                    .documents.firstOrNull()?.toModel<UserProfile>()
+                if (doc != null) {
+                    profileCache[doc.userId] = doc
+                    return@firestoreCatching doc
+                }
+            }
+            null
         }
 
     // =====================================================================================

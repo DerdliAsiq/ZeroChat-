@@ -100,7 +100,6 @@ import java.util.Locale
 @Composable
 fun StatusesTabScreen(
     statusesState: UiState<List<DecryptedStatusItem>>,
-    directoryState: UiState<List<UserProfile>> = UiState.Success(emptyList()),
     onPublishStatus: (String, String) -> Unit,
     onViewStatus: (DecryptedStatusItem) -> Unit = {},
     onReplyToStatus: (DecryptedStatusItem, String) -> Unit = { _, _ -> }
@@ -231,10 +230,8 @@ fun StatusesTabScreen(
     }
 
     selectedStatusForViewer?.let { viewedStatus ->
-        val peers = (directoryState as? UiState.Success)?.data ?: emptyList()
         StatusStoryViewerDialog(
             status = viewedStatus,
-            knownPeers = peers,
             onReply = { replyText ->
                 onReplyToStatus(viewedStatus, replyText)
                 selectedStatusForViewer = null
@@ -402,7 +399,6 @@ private fun CreateStatusDialog(
 @Composable
 private fun StatusStoryViewerDialog(
     status: DecryptedStatusItem,
-    knownPeers: List<UserProfile> = emptyList(),
     onReply: (String) -> Unit = {},
     onDismiss: () -> Unit
 ) {

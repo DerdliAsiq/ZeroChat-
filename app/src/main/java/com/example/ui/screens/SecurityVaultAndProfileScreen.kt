@@ -60,7 +60,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.example.crypto.HardwareKeyStatus
 import com.example.data.local.CachedVaultMessageEntity
 import com.example.data.model.UserProfile
 import com.example.ui.components.CyberQrMatrix
@@ -74,7 +73,6 @@ import com.example.ui.theme.ObsidianBlack
 @Composable
 fun SecurityVaultAndProfileScreen(
     myProfile: UserProfile?,
-    hardwareKeyStatus: HardwareKeyStatus? = null,
     isVaultUnlocked: Boolean,
     isPanicModeActive: Boolean,
     isScreenShieldEnabled: Boolean = false,
@@ -91,7 +89,7 @@ fun SecurityVaultAndProfileScreen(
     onToggleAutoLockOnBackground: (Boolean) -> Unit = {},
     onBiometricUnlockNow: () -> Unit = {},
     onFlushOfflineQueue: () -> Unit = {},
-    onExportEncryptedBackup: (String) -> Unit = {},
+    onExportEncryptedBackup: (String, ((String) -> Unit)?) -> Unit = { _, _ -> },
     onImportEncryptedBackup: (String, String) -> Unit = { _, _ -> },
     onUpdateProfile: (String, String, String) -> Unit,
     onUpdateVaultPins: (String, String) -> Unit,
@@ -110,6 +108,7 @@ fun SecurityVaultAndProfileScreen(
 
     var backupPassword by remember { mutableStateOf("") }
     var importVaultInput by remember { mutableStateOf("") }
+    var pendingBackupPayloadForSave by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(myProfile) {
         if (myProfile != null) {
@@ -120,7 +119,7 @@ fun SecurityVaultAndProfileScreen(
     }
 
     LaunchedEffect(exportedVaultBackupText) {
-        if (!exportedVaultBackupText.isNullOrBlank() && importVaultInput.isBlank()) {
+        if (!exportedVaultBackupText.isNullOrBlank()) {
             importVaultInput = exportedVaultBackupText
         }
     }
@@ -129,15 +128,14 @@ fun SecurityVaultAndProfileScreen(
     val saveVaultFileLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/octet-stream")
     ) { uri ->
-        if (uri != null) {
-            val payloadToWrite = exportedVaultBackupText?.ifBlank { importVaultInput } ?: importVaultInput
-            if (payloadToWrite.isNotBlank()) {
-                try {
-                    context.contentResolver.openOutputStream(uri)?.use { out ->
-                        out.write(payloadToWrite.toByteArray(Charsets.UTF_8))
-                    }
-                } catch (_: Exception) {
+        val payloadToWrite = (pendingBackupPayloadForSave ?: exportedVaultBackupText ?: importVaultInput).trim()
+        pendingBackupPayloadForSave = null
+        if (uri != null && payloadToWrite.isNotBlank()) {
+            try {
+                context.contentResolver.openOutputStream(uri)?.use { out ->
+                    out.write(payloadToWrite.toByteArray(Charsets.UTF_8))
                 }
+            } catch (_: Exception) {
             }
         }
     }
@@ -507,7 +505,8 @@ fun SecurityVaultAndProfileScreen(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        text = myProfile?.safetyFingerprint ?: "94810 28491 77261 00291\n88412 19283 44910 55821\n77319 00912 66418 33109",
+                        text = myProfile?.safetyFingerprint?.takeIf { it.isNotBlank() }
+                            ?: "Güvenlik numarası yükleniyor...",
                         fontFamily = JetBrainsMonoFontFamily,
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onBackground,
@@ -562,7 +561,7 @@ fun SecurityVaultAndProfileScreen(
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Button(
-                    onClick = { onExportEncryptedBackup(backupPassword) },
+                    onClick = { onExportEncryptedBackup(backupPassword, null) },
                     colors = ButtonDefaults.buttonColors(
                         containerColor = CyberCyan,
                         contentColor = Color(0xFF001F26)
@@ -584,8 +583,10 @@ fun SecurityVaultAndProfileScreen(
                 ) {
                     OutlinedButton(
                         onClick = {
-                            onExportEncryptedBackup(backupPassword)
-                            saveVaultFileLauncher.launch("zerochat_backup_${System.currentTimeMillis()}.zcvault")
+                            onExportEncryptedBackup(backupPassword) { encrypted ->
+                                pendingBackupPayloadForSave = encrypted
+                                saveVaultFileLauncher.launch("zerochat_backup_${System.currentTimeMillis()}.zcvault")
+                            }
                         },
                         border = BorderStroke(1.dp, CyberCyan),
                         modifier = Modifier

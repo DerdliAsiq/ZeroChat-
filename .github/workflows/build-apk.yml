@@ -54,7 +54,9 @@ jobs:
         run: npm ci
 
       - name: Debug APK Derle
-        run: ./gradlew assembleDebug -x lint --stacktrace --no-daemon
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug -x lint --stacktrace --no-daemon
 
       - name: Testler (Firestore Emulatoru ile)
         run: npm test

@@ -147,4 +147,17 @@ class CryptoProtocolTest {
         assertEquals("eski mesaj", LegacyCrypto.decrypt(box.ciphertext, box.iv, "REQ_FROM::alice::$hint"))
         assertNull(LegacyCrypto.decrypt(box.ciphertext, box.iv, "DIRECT_other"))
     }
+
+    @Test
+    fun handleSanitizationAndValidationWorkConsistently() {
+        assertEquals("aliveli1", com.example.data.repository.ZeroChatRepository.sanitizeHandle("  @Ali.Veli-1! "))
+        assertEquals("ali_veli1", com.example.data.repository.ZeroChatRepository.sanitizeHandle(" @Ali_Veli1 "))
+        assertEquals("abcdefghijklmnopqrstuvwx", com.example.data.repository.ZeroChatRepository.sanitizeHandle("abcdefghijklmnopqrstuvwxyz1234"))
+        assertTrue(com.example.data.repository.ZeroChatRepository.isValidHandle("ali_01"))
+        assertFalse(com.example.data.repository.ZeroChatRepository.isValidHandle("ab"))
+        assertEquals(
+            com.example.data.repository.ZeroChatRepository.directRoomId("uid_b", "uid_a"),
+            com.example.data.repository.ZeroChatRepository.directRoomId("uid_a", "uid_b")
+        )
+    }
 }

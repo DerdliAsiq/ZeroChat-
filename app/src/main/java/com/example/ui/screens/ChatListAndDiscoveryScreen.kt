@@ -20,6 +20,8 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AlternateEmail
@@ -49,6 +51,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.FloatingActionButton
@@ -74,6 +77,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -81,6 +85,7 @@ import com.example.R
 import com.example.crypto.CryptoEngine
 import com.example.data.model.ChatRoom
 import com.example.data.model.UserProfile
+import com.example.data.repository.ZeroChatRepository
 import com.example.ui.UiState
 import com.example.ui.components.QrScannerAndVerifierDialog
 import com.example.ui.theme.AmberTimerWarning
@@ -98,6 +103,9 @@ fun ChatListAndDiscoveryScreen(
     myProfile: UserProfile?,
     searchQuery: String,
     onSearchQueryChange: (String) -> Unit,
+    isSearchingUsers: Boolean = false,
+    searchError: String? = null,
+    onSearchSubmit: () -> Unit = {},
     directoryState: UiState<List<UserProfile>>,
     roomsState: UiState<List<ChatRoom>>,
     lockedRoomIds: Set<String>,
@@ -340,6 +348,8 @@ fun ChatListAndDiscoveryScreen(
                     }
                 },
                 singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = { onSearchSubmit() }),
                 shape = RoundedCornerShape(16.dp),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = NeonCyberGreen,
@@ -423,10 +433,17 @@ fun ChatListAndDiscoveryScreen(
                 // Global @username peer discovery section (always active regardless of directory loading state)
                 if (!isPanicModeActive) {
                     val peers = (directoryState as? UiState.Success)?.data ?: emptyList()
-                    val cleanSearchedHandle = searchQuery.trim().removePrefix("@").lowercase(Locale.ROOT)
-                        .replace("[^a-z0-9_\\-.]".toRegex(), "")
-                    val exactMatchedPeer = if (cleanSearchedHandle.isNotBlank()) {
-                        peers.firstOrNull { it.username.equals(cleanSearchedHandle, ignoreCase = true) }
+                    val rawSearchedHandle = searchQuery.trim().removePrefix("@").lowercase(Locale.ROOT)
+                    val sanitizedSearchedHandle = ZeroChatRepository.sanitizeHandle(searchQuery)
+                    val isSearchingMyOwnHandle = myProfile != null && (
+                        rawSearchedHandle.equals(myProfile.username, ignoreCase = true) ||
+                            (sanitizedSearchedHandle.isNotEmpty() && sanitizedSearchedHandle.equals(myProfile.username, ignoreCase = true))
+                        )
+                    val exactMatchedPeer = if (rawSearchedHandle.isNotBlank() || sanitizedSearchedHandle.isNotBlank()) {
+                        peers.firstOrNull {
+                            it.username.equals(rawSearchedHandle, ignoreCase = true) ||
+                                (sanitizedSearchedHandle.isNotEmpty() && it.username.equals(sanitizedSearchedHandle, ignoreCase = true))
+                        }
                     } else {
                         null
                     }
@@ -466,11 +483,50 @@ fun ChatListAndDiscoveryScreen(
                             }
                         }
 
-                        // Always show instant match / connection card when user searches a @username!
-                        if (cleanSearchedHandle.isNotBlank() && exactMatchedPeer == null && cleanSearchedHandle.length >= 2) {
+                        if (isSearchingUsers) {
+                            item {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(vertical = 6.dp)
+                                ) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(16.dp),
+                                        strokeWidth = 2.dp,
+                                        color = CyberCyan
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = "Kullanıcı aranıyor...",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = CyberCyan
+                                    )
+                                }
+                            }
+                        } else if (!searchError.isNullOrBlank()) {
                             item {
                                 Text(
-                                    text = "@$cleanSearchedHandle ile eşleşen kullanıcı bulunamadı. Kullanıcı adını tam yazın veya QR kodu tarayın.",
+                                    text = searchError,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.padding(vertical = 6.dp)
+                                )
+                            }
+                        } else if (isSearchingMyOwnHandle) {
+                            item {
+                                Text(
+                                    text = "Bu sizin kendi kullanıcı adınız (@${myProfile?.username}). Sohbet başlatmak için başka bir kullanıcının adını yazın.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = CyberCyan,
+                                    modifier = Modifier.padding(vertical = 6.dp)
+                                )
+                            }
+                        } else if ((rawSearchedHandle.length >= 2 || sanitizedSearchedHandle.length >= 2) &&
+                            exactMatchedPeer == null && peers.isEmpty()
+                        ) {
+                            item {
+                                val shownHandle = rawSearchedHandle.ifBlank { sanitizedSearchedHandle }
+                                Text(
+                                    text = "@$shownHandle ile eşleşen kullanıcı bulunamadı. Kullanıcı adını kontrol edin veya QR kodu tarayın.",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.padding(vertical = 6.dp)
@@ -764,7 +820,7 @@ fun ChatListAndDiscoveryScreen(
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        text = "'${targetRoom.title}' sohbetini ve içindeki tüm şifreli zarfları son sohbetler listesinden kalıcı olarak silmek istediğinize emin misiniz?",
+                        text = "'${targetRoom.title}' sohbetini ve içindeki tüm mesajları son sohbetler listesinden kalıcı olarak silmek istediğinize emin misiniz?",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
