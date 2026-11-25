@@ -404,13 +404,8 @@ private fun StatusStoryViewerDialog(
     onDismiss: () -> Unit
 ) {
     var replyText by remember { mutableStateOf("") }
-    val viewerHandles = remember(status.viewCount, knownPeers) {
-        val peerNames = knownPeers.map { "@${it.username}" }.distinct()
-        if (peerNames.isNotEmpty()) {
-            peerNames.take(status.viewCount.toInt().coerceIn(1, 5)).joinToString(", ")
-        } else {
-            "@${status.authorUsername}"
-        }
+    val viewerHandles = remember(status.viewerNames) {
+        if (status.viewerNames.isEmpty()) "Henüz görüntüleyen yok" else status.viewerNames.joinToString(", ") { "@$it" }
     }
 
     Dialog(onDismissRequest = onDismiss) {
@@ -778,13 +773,7 @@ fun CallsTabScreen(
                                 val d = call.createdAt?.toDate() ?: Date()
                                 SimpleDateFormat("dd MMM HH:mm", Locale.getDefault()).format(d)
                             }
-                            val canonicalEmojis = remember(call.callerUsername, call.calleeUsername, call.safetyEmojis) {
-                                CryptoEngine.deriveCanonicalPeerSafetyEmojis(
-                                    usernameA = call.callerUsername,
-                                    usernameB = call.calleeUsername,
-                                    fallbackSeed = call.safetyEmojis
-                                )
-                            }
+                            val canonicalEmojis = call.safetyEmojis.ifBlank { "—" }
                             val statusText = when (call.status) {
                                 "CONNECTED" -> "Bağlandı"
                                 "RINGING" -> "Çalıyor"
@@ -856,16 +845,10 @@ fun ActiveP2PCallOverlay(
         if (isCaller) callSignal.calleeUsername else callSignal.callerUsername
     }
 
-    val canonicalSafetyEmojis = remember(callSignal.callerUsername, callSignal.calleeUsername, callSignal.safetyEmojis) {
-        CryptoEngine.deriveCanonicalPeerSafetyEmojis(
-            usernameA = callSignal.callerUsername,
-            usernameB = callSignal.calleeUsername,
-            fallbackSeed = callSignal.safetyEmojis
-        )
-    }
+    val canonicalSafetyEmojis = callSignal.safetyEmojis.ifBlank { "—" }
 
-    val remoteAudioB64 = if (isCaller) callSignal.calleeAudioB64 else callSignal.callerAudioB64
-    val remoteVideoB64 = if (isCaller) callSignal.calleeVideoB64 else callSignal.callerVideoB64
+    val remoteAudioB64 = callSignal.remoteAudioB64
+    val remoteVideoB64 = callSignal.remoteVideoB64
     val remoteVideoBitmap = remember(remoteVideoB64) {
         if (remoteVideoB64.isNotBlank()) decodeBase64DataUriToImageBitmap(remoteVideoB64) else null
     }
@@ -905,12 +888,12 @@ fun ActiveP2PCallOverlay(
     }
 
     // Play incoming remote audio chunks automatically when CONNECTED
-    LaunchedEffect(callSignal.mediaSeq, remoteAudioB64, callSignal.status) {
+    LaunchedEffect(callSignal.remoteSeq, callSignal.status) {
         if (callSignal.status == "CONNECTED" &&
             remoteAudioB64.isNotBlank() &&
-            callSignal.mediaSeq > lastPlayedMediaSeq
+            callSignal.remoteSeq > lastPlayedMediaSeq
         ) {
-            lastPlayedMediaSeq = callSignal.mediaSeq
+            lastPlayedMediaSeq = callSignal.remoteSeq
             voiceAudioManager.playBase64Audio(
                 audioBase64 = remoteAudioB64,
                 onCompletion = {}
@@ -1183,13 +1166,7 @@ fun IncomingCallRingingOverlay(
 ) {
     BackHandler(onBack = onDeclineCall)
 
-    val canonicalSafetyEmojis = remember(callSignal.callerUsername, callSignal.calleeUsername, callSignal.safetyEmojis) {
-        CryptoEngine.deriveCanonicalPeerSafetyEmojis(
-            usernameA = callSignal.callerUsername,
-            usernameB = callSignal.calleeUsername,
-            fallbackSeed = callSignal.safetyEmojis
-        )
-    }
+    val canonicalSafetyEmojis = callSignal.safetyEmojis.ifBlank { "—" }
 
     Surface(
         color = ObsidianBlack,

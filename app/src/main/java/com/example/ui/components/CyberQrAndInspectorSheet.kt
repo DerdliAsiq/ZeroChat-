@@ -58,6 +58,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.example.crypto.CryptoEngine
+import com.example.ui.SafetyInfo
 import com.example.data.model.ChatRoom
 import com.example.data.model.DecryptedMessageItem
 import com.example.data.model.UserProfile
@@ -114,38 +115,16 @@ fun CyberQrMatrix(
 @Composable
 fun RoomSafetyAndCipherInspectorDialog(
     room: ChatRoom,
-    myUsername: String? = null,
+    safetyInfo: SafetyInfo?,
     inspectedMessage: DecryptedMessageItem?,
     isPeerVerified: Boolean = false,
     hasKeyChangedWarning: Boolean = false,
     onVerifyIdentity: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
-    val peerHandle = remember(room.title, room.participantNames, myUsername) {
-        room.peerHandleFor(myUsername)
-    }
-    val safetyNumber = remember(myUsername, peerHandle, room.effectiveRoomKeyHint) {
-        if (!room.isGroup) {
-            CryptoEngine.deriveCanonicalSafetyNumber(
-                usernameA = myUsername,
-                usernameB = peerHandle,
-                fallbackSeed = room.effectiveRoomKeyHint
-            )
-        } else {
-            CryptoEngine.generateIdentityMaterial(room.id, room.effectiveRoomKeyHint).second
-        }
-    }
-    val emojis = remember(myUsername, peerHandle, room.effectiveRoomKeyHint) {
-        if (!room.isGroup) {
-            CryptoEngine.deriveCanonicalPeerSafetyEmojis(
-                usernameA = myUsername,
-                usernameB = peerHandle,
-                fallbackSeed = room.effectiveRoomKeyHint
-            )
-        } else {
-            CryptoEngine.deriveSafetyEmojis(room.effectiveRoomKeyHint)
-        }
-    }
+    val safetyNumber = safetyInfo?.safetyNumber
+        ?: if (room.isGroup) "Grup sohbetlerinde her üyeyi kendi sohbetinizden doğrulayın." else "Karşı tarafın şifreleme anahtarları henüz yüklenmedi."
+    val emojis = safetyInfo?.emojis ?: "—"
 
     Dialog(onDismissRequest = onDismiss) {
         Card(
@@ -194,12 +173,6 @@ fun RoomSafetyAndCipherInspectorDialog(
 
                 Spacer(modifier = Modifier.height(10.dp))
 
-                CyberQrMatrix(
-                    seedData = "zerochat://peer?u=${Uri.encode(peerHandle)}&fp=${Uri.encode(safetyNumber)}"
-                )
-
-                Spacer(modifier = Modifier.height(12.dp))
-
                 Surface(
                     shape = RoundedCornerShape(14.dp),
                     color = MaterialTheme.colorScheme.primaryContainer,
@@ -226,7 +199,7 @@ fun RoomSafetyAndCipherInspectorDialog(
                 Spacer(modifier = Modifier.height(8.dp))
 
                 Text(
-                    text = "Karşı cihazdaki ekranda da aynı 4 emojiyi ve güvenlik numarasını görüyorsanız sohbetiniz uçtan uca güvendedir.",
+                    text = "Bu değerler iki tarafın şifreleme anahtarlarından hesaplanır. Karşı cihazda da aynı emojileri ve numarayı görüyorsanız arada kimse yoktur. Anahtarlar değişirse değerler de değişir.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center
@@ -289,7 +262,17 @@ fun RoomSafetyAndCipherInspectorDialog(
                                 color = CyberCyan
                             )
                             Text(
-                                text = "Durum: ✓✓ Uçtan uca şifreli olarak iletildi",
+                                text = when {
+                                    inspectedMessage.isLegacy -> "Eski şifreleme (V1): bu mesaj sunucu tarafından okunabilir durumdaydı"
+                                    inspectedMessage.isSignatureVerified -> "İmza doğrulandı: mesaj gönderen tarafından yazılmış ve değiştirilmemiş"
+                                    inspectedMessage.isSignerKeyChanged -> "Gönderen anahtarını değiştirmiş: imza eski anahtarla atılmış"
+                                    else -> "İmza doğrulanamadı"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = "Okuyan: ${inspectedMessage.readByCount} kişi",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -343,9 +326,11 @@ fun QrScannerAndVerifierDialog(
     val myQrPayload = remember(myProfile) {
         val handle = myProfile?.username ?: "zerochat_user"
         val uid = myProfile?.userId ?: "uid_$handle"
-        val fp = myProfile?.safetyFingerprint ?: CryptoEngine.sha256Hex(handle).take(30)
-        val pk = myProfile?.publicKey ?: "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE"
-        "zerochat://peer?u=${Uri.encode(handle)}&uid=${Uri.encode(uid)}&fp=${Uri.encode(fp)}&pk=${Uri.encode(pk)}"
+        // The fingerprint is recomputed from the published keys; the scanner checks it against the server.
+        val fp = myProfile?.takeIf { it.hasE2eeKeys }
+            ?.let { CryptoEngine.fingerprint(it.publicKey, it.signingKey).filter { c -> c.isDigit() } }
+            .orEmpty()
+        "zerochat://peer?u=${Uri.encode(handle)}&uid=${Uri.encode(uid)}&fp=${Uri.encode(fp)}"
     }
 
     Dialog(onDismissRequest = onDismiss) {

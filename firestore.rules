@@ -1,228 +1,389 @@
 rules_version = '2';
+
+// ZeroChat V2 security rules.
+// Message content is end-to-end encrypted on the client; these rules protect integrity and
+// metadata: who can create rooms, who belongs to a room, who can write which documents.
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Global default-deny catch-all
-    match /{document=**} {
-      allow read, write: if false;
-    }
+    // ------------------------------------------------------------------ helpers
 
-    // Core Primitives
-    function isSignedIn() {
-      return request.auth != null;
-    }
-
-    function incoming() {
-      return request.resource.data;
-    }
-
-    function existing() {
-      return resource.data;
-    }
+    function signedIn() { return request.auth != null; }
+    function me() { return request.auth.uid; }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function changed() { return incoming().diff(existing()).affectedKeys(); }
 
     function isValidId(id) {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
-    // Validation Helpers
-    function isValidUserProfile(data) {
-      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
-             data.username is string && data.username.size() >= 3 && data.username.size() <= 32 &&
-             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 64 &&
-             data.bio is string && data.bio.size() <= 240 &&
-             data.publicKey is string && data.publicKey.size() >= 8 && data.publicKey.size() <= 2048 &&
-             data.safetyFingerprint is string && data.safetyFingerprint.size() >= 8 && data.safetyFingerprint.size() <= 256 &&
-             data.onlineStatus is string && data.onlineStatus.size() >= 1 && data.onlineStatus.size() <= 32;
+    function str(v, min, max) { return v is string && v.size() >= min && v.size() <= max; }
+
+    // Timestamps written by the client must be FieldValue.serverTimestamp().
+    function isNowOrUnset(v) { return v == request.time; }
+
+    function roomPath(roomId) { return /databases/$(database)/documents/rooms/$(roomId); }
+    function roomData(roomId) { return get(roomPath(roomId)).data; }
+    function roomAfter(roomId) { return getAfter(roomPath(roomId)).data; }
+    function isParticipant(roomId) {
+      return exists(roomPath(roomId)) && me() in roomData(roomId).participantUids;
+    }
+    function roomStatus(room) { return room.get('status', 'ACTIVE'); }
+
+    // Owner-created usernames claim: usernames/{handle}.uid == uid
+    function handleOwnedBy(handle, uid) {
+      return getAfter(/databases/$(database)/documents/usernames/$(handle)).data.uid == uid;
     }
 
-    function isValidChatRoom(data) {
-      return data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 &&
-             data.participantUids is list && data.participantUids.size() >= 1 && data.participantUids.size() <= 10 &&
-             data.participantUids[0] is string &&
-             data.participantNames is string && data.participantNames.size() >= 1 && data.participantNames.size() <= 512 &&
-             data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
-             data.isGroup is bool &&
-             data.roomKeyHint is string && data.roomKeyHint.size() >= 4 && data.roomKeyHint.size() <= 256 &&
-             data.lastCipherPreview is string && data.lastCipherPreview.size() <= 1024 &&
-             data.lastSenderName is string && data.lastSenderName.size() <= 64 &&
-             data.defaultTtlSeconds is int && data.defaultTtlSeconds >= 0 && data.defaultTtlSeconds <= 604800;
+    // Default deny.
+    match /{document=**} {
+      allow read, write: if false;
     }
 
-    function isValidEncryptedEnvelope(data) {
-      return data.roomId is string && data.roomId.size() >= 1 && data.roomId.size() <= 128 &&
-             data.senderId is string && data.senderId.size() >= 1 && data.senderId.size() <= 128 &&
-             data.senderUsername is string && data.senderUsername.size() >= 1 && data.senderUsername.size() <= 64 &&
-             data.participantUids is list && data.participantUids.size() >= 1 && data.participantUids.size() <= 10 &&
-             data.participantUids[0] is string &&
-             data.ciphertext is string && data.ciphertext.size() >= 1 && data.ciphertext.size() <= 262144 &&
-             data.iv is string && data.iv.size() >= 4 && data.iv.size() <= 128 &&
-             data.signatureHash is string && data.signatureHash.size() >= 4 && data.signatureHash.size() <= 256 &&
-             data.messageType is string && data.messageType in ['TEXT', 'IMAGE', 'VOICE', 'POLL', 'LOCATION', 'FILE'] &&
-             data.encryptedMeta is string && data.encryptedMeta.size() <= 262144 &&
-             data.reactionsSummary is string && data.reactionsSummary.size() <= 2048 &&
-             data.ttlSeconds is int && data.ttlSeconds >= 0 && data.ttlSeconds <= 604800;
+    // ------------------------------------------------------------------ usernames
+
+    match /usernames/{handle} {
+      allow get: if signedIn();
+      // Prefix search only, small pages.
+      allow list: if signedIn() && request.query.limit <= 20;
+      allow create: if signedIn() &&
+                       handle.matches('^[a-z0-9_]{3,24}$') &&
+                       incoming().keys().hasOnly(['uid', 'createdAt']) &&
+                       incoming().uid == me() &&
+                       isNowOrUnset(incoming().createdAt);
+      allow delete: if signedIn() && existing().uid == me();
     }
 
-    function isValidEncryptedStatus(data) {
-      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
-             data.authorUsername is string && data.authorUsername.size() >= 1 && data.authorUsername.size() <= 64 &&
-             data.ciphertext is string && data.ciphertext.size() >= 1 && data.ciphertext.size() <= 4096 &&
-             data.iv is string && data.iv.size() >= 4 && data.iv.size() <= 128 &&
-             data.themeColorHex is string && data.themeColorHex.size() >= 4 && data.themeColorHex.size() <= 16 &&
-             data.viewCount is int && data.viewCount >= 0 && data.viewCount <= 1000000;
+    // ------------------------------------------------------------------ users
+
+    function validProfile(d) {
+      return d.userId == me() &&
+             d.username is string && d.username.matches('^[a-z0-9_]{3,24}$') &&
+             handleOwnedBy(d.username, me()) &&
+             str(d.displayName, 1, 64) &&
+             str(d.bio, 0, 200) &&
+             str(d.publicKey, 0, 512) &&
+             str(d.get('signingKey', ''), 0, 512) &&
+             str(d.safetyFingerprint, 0, 128) &&
+             d.onlineStatus in ['ONLINE', 'OFFLINE'] &&
+             d.get('protocolVersion', 0) is int;
     }
 
-    function isValidCallSignal(data) {
-      return data.callerId is string && data.callerId.size() >= 1 && data.callerId.size() <= 128 &&
-             data.callerUsername is string && data.callerUsername.size() >= 1 && data.callerUsername.size() <= 64 &&
-             data.calleeUsername is string && data.calleeUsername.size() >= 1 && data.calleeUsername.size() <= 64 &&
-             data.participantUids is list && data.participantUids.size() >= 1 && data.participantUids.size() <= 10 &&
-             data.participantUids[0] is string &&
-             data.callType is string && data.callType in ['AUDIO', 'VIDEO'] &&
-             data.status is string && data.status in ['RINGING', 'CONNECTED', 'ENDED'] &&
-             data.safetyEmojis is string && data.safetyEmojis.size() >= 1 && data.safetyEmojis.size() <= 64 &&
-             (!('callerAudioB64' in data) || (data.callerAudioB64 is string && data.callerAudioB64.size() <= 131072)) &&
-             (!('calleeAudioB64' in data) || (data.calleeAudioB64 is string && data.calleeAudioB64.size() <= 131072)) &&
-             (!('callerVideoB64' in data) || (data.callerVideoB64 is string && data.callerVideoB64.size() <= 131072)) &&
-             (!('calleeVideoB64' in data) || (data.calleeVideoB64 is string && data.calleeVideoB64.size() <= 131072)) &&
-             (!('mediaSeq' in data) || (data.mediaSeq is int && data.mediaSeq >= 0 && data.mediaSeq <= 100000000));
-    }
-
-    // 1. /users/{userId} - Public Cryptographic Key & Username Directory (Zero PII)
     match /users/{userId} {
-      allow get: if isSignedIn() && isValidId(userId);
-      allow list: if isSignedIn() && existing().username is string;
-
-      allow create: if isSignedIn() &&
-                       isValidId(userId) &&
-                       request.auth.uid == userId &&
-                       incoming().userId == request.auth.uid &&
-                       incoming().keys().hasAll(['userId', 'username', 'displayName', 'bio', 'publicKey', 'safetyFingerprint', 'onlineStatus', 'createdAt', 'updatedAt']) &&
-                       incoming().keys().hasOnly(['userId', 'username', 'displayName', 'bio', 'publicKey', 'safetyFingerprint', 'onlineStatus', 'createdAt', 'updatedAt']) &&
-                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
-                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
-                       isValidUserProfile(incoming());
-
-      allow update: if isSignedIn() &&
-                       isValidId(userId) &&
-                       isValidUserProfile(incoming()) &&
-                       request.auth.uid == userId &&
-                       incoming().userId == existing().userId &&
-                       incoming().createdAt == existing().createdAt &&
-                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
-                       incoming().diff(existing()).affectedKeys().hasOnly(['username', 'displayName', 'bio', 'publicKey', 'safetyFingerprint', 'onlineStatus', 'updatedAt']);
-
-      allow delete: if isSignedIn() && isValidId(userId) && request.auth.uid == userId;
+      allow get: if signedIn();
+      // Only small, targeted lookups (whereIn on document ids); no directory dumps.
+      allow list: if signedIn() && request.query.limit <= 30;
+      allow create: if signedIn() && userId == me() &&
+                       incoming().keys().hasOnly(['userId', 'username', 'displayName', 'bio', 'publicKey', 'signingKey',
+                                                  'safetyFingerprint', 'onlineStatus', 'protocolVersion', 'createdAt', 'updatedAt']) &&
+                       validProfile(incoming()) &&
+                       isNowOrUnset(incoming().createdAt) && isNowOrUnset(incoming().updatedAt);
+      allow update: if signedIn() && userId == me() &&
+                       changed().hasOnly(['username', 'displayName', 'bio', 'publicKey', 'signingKey',
+                                          'safetyFingerprint', 'onlineStatus', 'protocolVersion', 'updatedAt']) &&
+                       validProfile(incoming()) &&
+                       isNowOrUnset(incoming().updatedAt);
+      allow delete: if signedIn() && userId == me();
     }
 
-    // 2. /rooms/{roomId} - E2EE Chat Rooms
+    // ------------------------------------------------------------------ rooms
+
+    function validPreview(d) {
+      return d.get('lastPreviewKv', 0) is int &&
+             str(d.get('lastPreviewIv', ''), 0, 64) &&
+             str(d.get('lastPreviewCt', ''), 0, 1024);
+    }
+
+    function validRoomShape(d) {
+      return d.participantUids is list &&
+             d.participantUids.size() >= 1 && d.participantUids.size() <= 16 &&
+             str(d.participantNames, 0, 1024) &&
+             str(d.title, 1, 120) &&
+             d.isGroup is bool &&
+             d.defaultTtlSeconds is int && d.defaultTtlSeconds >= 0 && d.defaultTtlSeconds <= 604800 &&
+             d.keyVersion is int && d.keyVersion >= 0 &&
+             validPreview(d);
+    }
+
+    function keysDocExistsAfter(roomId, version) {
+      return existsAfter(/databases/$(database)/documents/rooms/$(roomId)/keys/$(string(version)));
+    }
+
+    // Sender updates the encrypted "last message" preview together with a new envelope.
+    function isPreviewUpdate() {
+      return changed().hasOnly(['lastPreviewKv', 'lastPreviewIv', 'lastPreviewCt', 'lastSenderUid', 'lastActivityAt', 'updatedAt']) &&
+             incoming().lastSenderUid == me() &&
+             incoming().lastActivityAt == request.time &&
+             validPreview(incoming());
+    }
+
+    // Any participant may create the next key version (atomically with keys/{v}).
+    function isRekey(roomId) {
+      return changed().hasOnly(['keyVersion', 'updatedAt']) &&
+             incoming().keyVersion == existing().get('keyVersion', 0) + 1 &&
+             keysDocExistsAfter(roomId, incoming().keyVersion);
+    }
+
+    // Direct-message request handling (only the non-requester can accept or reject).
+    function isRequestDecision() {
+      return existing().isGroup == false &&
+             roomStatus(existing()) == 'PENDING' &&
+             existing().requesterUid != me() &&
+             changed().hasOnly(['status', 'updatedAt']) &&
+             incoming().status in ['ACTIVE', 'REJECTED'];
+    }
+
+    // Either side may re-request a rejected conversation (new key version, preview).
+    function isReRequest(roomId) {
+      return existing().isGroup == false &&
+             roomStatus(existing()) == 'REJECTED' &&
+             changed().hasOnly(['status', 'requesterUid', 'keyVersion', 'lastPreviewKv', 'lastPreviewIv',
+                                'lastPreviewCt', 'lastSenderUid', 'lastActivityAt', 'updatedAt']) &&
+             incoming().status == 'PENDING' &&
+             incoming().requesterUid == me() &&
+             incoming().keyVersion == existing().get('keyVersion', 0) + 1 &&
+             keysDocExistsAfter(roomId, incoming().keyVersion);
+    }
+
+    function isTtlChange() {
+      return changed().hasOnly(['defaultTtlSeconds', 'updatedAt']) &&
+             (existing().isGroup == false || existing().ownerId == me());
+    }
+
+    // Group owner edits title / members. Membership changes require a new key version.
+    function isGroupEdit(roomId) {
+      return existing().isGroup == true &&
+             existing().ownerId == me() &&
+             me() in incoming().participantUids &&
+             changed().hasOnly(['title', 'participantUids', 'participantNames', 'keyVersion', 'updatedAt']) &&
+             (incoming().participantUids == existing().participantUids ||
+               (incoming().keyVersion == existing().get('keyVersion', 0) + 1 &&
+                keysDocExistsAfter(roomId, incoming().keyVersion)));
+    }
+
+    // A non-owner removes only themself from a group.
+    function isLeave() {
+      return existing().isGroup == true &&
+             existing().ownerId != me() &&
+             changed().hasOnly(['participantUids', 'participantNames', 'updatedAt']) &&
+             incoming().participantUids == existing().participantUids.removeAll([me()]);
+    }
+
     match /rooms/{roomId} {
-      allow get: if isSignedIn() && isValidId(roomId) && request.auth.uid in existing().participantUids;
-      allow list: if isSignedIn() && request.auth.uid in existing().participantUids;
+      allow get: if signedIn() && me() in existing().participantUids;
+      allow list: if signedIn() && me() in existing().participantUids;
 
-      allow create: if isSignedIn() &&
-                       isValidId(roomId) &&
-                       incoming().ownerId == request.auth.uid &&
-                       request.auth.uid in incoming().participantUids &&
-                       incoming().keys().hasAll(['ownerId', 'participantUids', 'participantNames', 'title', 'isGroup', 'roomKeyHint', 'lastCipherPreview', 'lastSenderName', 'defaultTtlSeconds', 'createdAt', 'updatedAt']) &&
-                       incoming().keys().hasOnly(['ownerId', 'participantUids', 'participantNames', 'title', 'isGroup', 'roomKeyHint', 'lastCipherPreview', 'lastSenderName', 'defaultTtlSeconds', 'createdAt', 'updatedAt']) &&
-                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
-                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
-                       isValidChatRoom(incoming());
+      allow create: if signedIn() && isValidId(roomId) &&
+                       incoming().keys().hasOnly(['ownerId', 'participantUids', 'participantNames', 'title', 'isGroup', 'status',
+                                                  'requesterUid', 'keyVersion', 'defaultTtlSeconds', 'lastPreviewKv',
+                                                  'lastPreviewIv', 'lastPreviewCt', 'lastSenderUid', 'lastActivityAt',
+                                                  'createdAt', 'updatedAt']) &&
+                       validRoomShape(incoming()) &&
+                       incoming().ownerId == me() &&
+                       me() in incoming().participantUids &&
+                       incoming().lastSenderUid == me() &&
+                       isNowOrUnset(incoming().createdAt) && isNowOrUnset(incoming().updatedAt) &&
+                       incoming().keyVersion == 1 && keysDocExistsAfter(roomId, 1) &&
+                       (
+                         // Direct message: deterministic id from the two sorted uids, starts as a request.
+                         (incoming().isGroup == false &&
+                          incoming().participantUids.size() == 2 &&
+                          incoming().participantUids[0] < incoming().participantUids[1] &&
+                          roomId == 'dm_' + incoming().participantUids[0] + '_' + incoming().participantUids[1] &&
+                          incoming().status == 'PENDING' &&
+                          incoming().requesterUid == me())
+                         ||
+                         (incoming().isGroup == true && incoming().status == 'ACTIVE')
+                       );
 
-      allow update: if isSignedIn() &&
-                       isValidId(roomId) &&
-                       isValidChatRoom(incoming()) &&
-                       request.auth.uid in existing().participantUids &&
-                       request.auth.uid in incoming().participantUids &&
+      allow update: if signedIn() &&
+                       me() in existing().participantUids &&
                        incoming().ownerId == existing().ownerId &&
-                       incoming().createdAt == existing().createdAt &&
-                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
-                       incoming().diff(existing()).affectedKeys().hasOnly(['participantUids', 'participantNames', 'title', 'roomKeyHint', 'lastCipherPreview', 'lastSenderName', 'defaultTtlSeconds', 'updatedAt']);
+                       incoming().isGroup == existing().isGroup &&
+                       incoming().get('updatedAt', request.time) == request.time &&
+                       (
+                         (me() in incoming().participantUids &&
+                           (isPreviewUpdate() || isRekey(roomId) || isRequestDecision() ||
+                            isReRequest(roomId) || isTtlChange() || isGroupEdit(roomId))) ||
+                         isLeave()
+                       );
 
-      allow delete: if isSignedIn() && isValidId(roomId) && existing().ownerId == request.auth.uid;
+      allow delete: if signedIn() && existing().ownerId == me();
+
+      // Room key versions: the key wrapped for every current participant.
+      match /keys/{version} {
+        allow get, list: if signedIn() && me() in roomData(roomId).participantUids;
+        allow create: if signedIn() &&
+                         me() in roomAfter(roomId).participantUids &&
+                         int(version) == roomAfter(roomId).keyVersion &&
+                         !exists(/databases/$(database)/documents/rooms/$(roomId)/keys/$(version)) &&
+                         incoming().keys().hasOnly(['createdBy', 'wrappedKeys', 'recipientKeyIds', 'createdAt']) &&
+                         incoming().createdBy == me() &&
+                         incoming().wrappedKeys is map &&
+                         incoming().wrappedKeys.keys().hasAll(roomAfter(roomId).participantUids) &&
+                         incoming().wrappedKeys.keys().hasOnly(roomAfter(roomId).participantUids) &&
+                         incoming().recipientKeyIds is map &&
+                         isNowOrUnset(incoming().createdAt);
+        allow delete: if signedIn() && roomData(roomId).ownerId == me();
+      }
+
+      // Per-user encrypted reactions / poll votes / pins: {envelopeId}_{uid}_{kind}
+      match /annotations/{annId} {
+        allow read: if signedIn() && me() in roomData(roomId).participantUids;
+        allow create, update: if signedIn() &&
+                                 me() in roomData(roomId).participantUids &&
+                                 incoming().keys().hasOnly(['envelopeId', 'uid', 'kind', 'keyVersion', 'iv', 'ciphertext', 'updatedAt']) &&
+                                 incoming().uid == me() &&
+                                 incoming().kind in ['REACTION', 'VOTE', 'PIN'] &&
+                                 isValidId(incoming().envelopeId) &&
+                                 annId == incoming().envelopeId + '_' + me() + '_' + incoming().kind &&
+                                 incoming().keyVersion is int &&
+                                 str(incoming().iv, 0, 64) && str(incoming().ciphertext, 0, 512) &&
+                                 isNowOrUnset(incoming().updatedAt);
+        allow delete: if signedIn() &&
+                         me() in roomData(roomId).participantUids &&
+                         (existing().uid == me() || existing().kind == 'PIN' || roomData(roomId).ownerId == me());
+      }
+
+      // Read position and typing indicator per participant.
+      match /presence/{uid} {
+        allow read: if signedIn() && me() in roomData(roomId).participantUids;
+        allow create, update: if signedIn() && uid == me() &&
+                                 me() in roomData(roomId).participantUids &&
+                                 incoming().keys().hasOnly(['lastReadAt', 'typingAt']) &&
+                                 (!('lastReadAt' in incoming()) || incoming().lastReadAt is timestamp) &&
+                                 (!('typingAt' in incoming()) || incoming().typingAt is timestamp);
+        allow delete: if signedIn() && (uid == me() || roomData(roomId).ownerId == me());
+      }
     }
 
-    // 3. /envelopes/{envelopeId} - E2EE Message Envelopes
+    // ------------------------------------------------------------------ envelopes (messages)
+
     match /envelopes/{envelopeId} {
-      allow get: if isSignedIn() && isValidId(envelopeId) && request.auth.uid in existing().participantUids;
-      allow list: if isSignedIn() && request.auth.uid in existing().participantUids;
+      allow get, list: if signedIn() && me() in existing().participantUids;
 
-      allow create: if isSignedIn() &&
-                       isValidId(envelopeId) &&
-                       incoming().senderId == request.auth.uid &&
-                       request.auth.uid in incoming().participantUids &&
-                       incoming().keys().hasAll(['roomId', 'senderId', 'senderUsername', 'participantUids', 'ciphertext', 'iv', 'signatureHash', 'messageType', 'encryptedMeta', 'reactionsSummary', 'ttlSeconds', 'createdAt', 'updatedAt']) &&
-                       incoming().keys().hasOnly(['roomId', 'senderId', 'senderUsername', 'participantUids', 'ciphertext', 'iv', 'signatureHash', 'messageType', 'encryptedMeta', 'reactionsSummary', 'ttlSeconds', 'createdAt', 'updatedAt']) &&
-                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
-                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
-                       isValidEncryptedEnvelope(incoming());
+      allow create: if signedIn() && isValidId(envelopeId) &&
+                       incoming().keys().hasOnly(['roomId', 'senderId', 'participantUids', 'v', 'keyVersion', 'iv',
+                                                  'ciphertext', 'sig', 'signerKeyId', 'ttlSeconds', 'expireAt',
+                                                  'edited', 'createdAt', 'updatedAt']) &&
+                       incoming().senderId == me() &&
+                       incoming().v == 2 &&
+                       isValidId(incoming().roomId) &&
+                       // The envelope must target a real room the sender belongs to, with exactly
+                       // the room's participants, and a request may only be used by its requester.
+                       isParticipant(incoming().roomId) &&
+                       incoming().participantUids == roomData(incoming().roomId).participantUids &&
+                       (roomStatus(roomData(incoming().roomId)) == 'ACTIVE' ||
+                         (roomStatus(roomData(incoming().roomId)) == 'PENDING' &&
+                          roomData(incoming().roomId).requesterUid == me())) &&
+                       incoming().keyVersion is int && incoming().keyVersion >= 1 &&
+                       incoming().keyVersion <= roomAfter(incoming().roomId).keyVersion &&
+                       str(incoming().iv, 12, 64) &&
+                       str(incoming().ciphertext, 1, 700000) &&
+                       str(incoming().sig, 16, 256) &&
+                       str(incoming().signerKeyId, 0, 64) &&
+                       incoming().ttlSeconds is int && incoming().ttlSeconds >= 0 && incoming().ttlSeconds <= 604800 &&
+                       (incoming().ttlSeconds == 0 ||
+                         (incoming().expireAt is timestamp &&
+                          incoming().expireAt > request.time &&
+                          incoming().expireAt <= request.time + duration.value(incoming().ttlSeconds + 600, 's'))) &&
+                       incoming().edited == false &&
+                       isNowOrUnset(incoming().createdAt) && isNowOrUnset(incoming().updatedAt);
 
-      allow update: if isSignedIn() &&
-                       isValidId(envelopeId) &&
-                       isValidEncryptedEnvelope(incoming()) &&
-                       request.auth.uid in existing().participantUids &&
-                       incoming().roomId == existing().roomId &&
-                       incoming().senderId == existing().senderId &&
-                       incoming().participantUids == existing().participantUids &&
-                       incoming().createdAt == existing().createdAt &&
-                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
-                       incoming().diff(existing()).affectedKeys().hasOnly(['ciphertext', 'iv', 'signatureHash', 'encryptedMeta', 'reactionsSummary', 'updatedAt']);
+      // Only the sender may edit (re-encrypt) a message.
+      allow update: if signedIn() &&
+                       existing().senderId == me() &&
+                       existing().get('v', 0) == 2 &&
+                       changed().hasOnly(['iv', 'ciphertext', 'sig', 'signerKeyId', 'edited', 'updatedAt']) &&
+                       str(incoming().iv, 12, 64) &&
+                       str(incoming().ciphertext, 1, 700000) &&
+                       str(incoming().sig, 16, 256) &&
+                       incoming().edited == true &&
+                       incoming().updatedAt == request.time;
 
-      allow delete: if isSignedIn() && isValidId(envelopeId) && request.auth.uid in existing().participantUids;
+      // Sender any time; any participant once expired; the room owner for room deletion.
+      allow delete: if signedIn() && me() in existing().participantUids &&
+                       (existing().senderId == me() ||
+                        (existing().get('expireAt', null) != null && existing().expireAt < request.time) ||
+                        (exists(roomPath(existing().roomId)) && roomData(existing().roomId).ownerId == me()));
     }
 
-    // 4. /statuses/{statusId} - 24h Encrypted Statuses
+    // ------------------------------------------------------------------ statuses (24 h)
+
     match /statuses/{statusId} {
-      allow get: if isSignedIn() && isValidId(statusId);
-      allow list: if isSignedIn() && existing().userId is string;
+      allow get, list: if signedIn() && me() in existing().audienceUids;
+      allow create: if signedIn() && isValidId(statusId) &&
+                       incoming().keys().hasOnly(['userId', 'audienceUids', 'wrappedKeys', 'iv', 'ciphertext', 'sig',
+                                                  'themeColorHex', 'createdAt', 'expireAt']) &&
+                       incoming().userId == me() &&
+                       incoming().audienceUids is list &&
+                       me() in incoming().audienceUids &&
+                       incoming().audienceUids.size() <= 200 &&
+                       incoming().wrappedKeys is map &&
+                       incoming().wrappedKeys.keys().hasAll(incoming().audienceUids) &&
+                       incoming().wrappedKeys.keys().hasOnly(incoming().audienceUids) &&
+                       str(incoming().iv, 12, 64) &&
+                       str(incoming().ciphertext, 1, 8192) &&
+                       str(incoming().sig, 16, 256) &&
+                       incoming().themeColorHex is string && incoming().themeColorHex.matches('^#[0-9A-Fa-f]{6}$') &&
+                       isNowOrUnset(incoming().createdAt) &&
+                       incoming().expireAt is timestamp &&
+                       incoming().expireAt <= request.time + duration.value(25, 'h');
+      allow update: if false;
+      allow delete: if signedIn() && (existing().userId == me() || existing().expireAt < request.time);
 
-      allow create: if isSignedIn() &&
-                       isValidId(statusId) &&
-                       incoming().userId == request.auth.uid &&
-                       incoming().keys().hasAll(['userId', 'authorUsername', 'ciphertext', 'iv', 'themeColorHex', 'viewCount', 'createdAt', 'updatedAt']) &&
-                       incoming().keys().hasOnly(['userId', 'authorUsername', 'ciphertext', 'iv', 'themeColorHex', 'viewCount', 'createdAt', 'updatedAt']) &&
-                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
-                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
-                       isValidEncryptedStatus(incoming());
-
-      allow update: if isSignedIn() &&
-                       isValidId(statusId) &&
-                       isValidEncryptedStatus(incoming()) &&
-                       incoming().userId == existing().userId &&
-                       incoming().createdAt == existing().createdAt &&
-                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
-                       incoming().diff(existing()).affectedKeys().hasOnly(['viewCount', 'updatedAt']);
-
-      allow delete: if isSignedIn() && isValidId(statusId) && existing().userId == request.auth.uid;
+      match /views/{viewerUid} {
+        allow read: if signedIn() &&
+                       get(/databases/$(database)/documents/statuses/$(statusId)).data.userId == me();
+        allow create, update: if signedIn() && viewerUid == me() &&
+                                 me() in get(/databases/$(database)/documents/statuses/$(statusId)).data.audienceUids &&
+                                 incoming().keys().hasOnly(['viewedAt']) &&
+                                 incoming().viewedAt == request.time;
+      }
     }
 
-    // 5. /calls/{callId} - Encrypted P2P Call Signaling
+    // ------------------------------------------------------------------ calls
+
+    function callData(callId) { return get(/databases/$(database)/documents/calls/$(callId)).data; }
+
     match /calls/{callId} {
-      allow get: if isSignedIn() && isValidId(callId) && request.auth.uid in existing().participantUids;
-      allow list: if isSignedIn() && request.auth.uid in existing().participantUids;
+      allow get, list: if signedIn() && me() in existing().participantUids;
+      allow create: if signedIn() && isValidId(callId) &&
+                       incoming().keys().hasOnly(['callerId', 'calleeUid', 'roomId', 'keyVersion', 'participantUids',
+                                                  'callType', 'status', 'createdAt', 'updatedAt']) &&
+                       incoming().callerId == me() &&
+                       incoming().participantUids == [me(), incoming().calleeUid] &&
+                       incoming().calleeUid != me() &&
+                       isParticipant(incoming().roomId) &&
+                       roomData(incoming().roomId).isGroup == false &&
+                       roomStatus(roomData(incoming().roomId)) == 'ACTIVE' &&
+                       incoming().calleeUid in roomData(incoming().roomId).participantUids &&
+                       incoming().keyVersion is int && incoming().keyVersion >= 1 &&
+                       incoming().callType in ['AUDIO', 'VIDEO'] &&
+                       incoming().status == 'RINGING' &&
+                       isNowOrUnset(incoming().createdAt) && isNowOrUnset(incoming().updatedAt);
+      // RINGING -> CONNECTED by the callee only; anything -> ENDED by either side; never back.
+      allow update: if signedIn() && me() in existing().participantUids &&
+                       changed().hasOnly(['status', 'updatedAt']) &&
+                       incoming().updatedAt == request.time &&
+                       ((existing().status == 'RINGING' && incoming().status == 'CONNECTED' && existing().calleeUid == me()) ||
+                        (existing().status != 'ENDED' && incoming().status == 'ENDED'));
+      allow delete: if false;
 
-      allow create: if isSignedIn() &&
-                       isValidId(callId) &&
-                       incoming().callerId == request.auth.uid &&
-                       request.auth.uid in incoming().participantUids &&
-                       incoming().keys().hasAll(['callerId', 'callerUsername', 'calleeUsername', 'participantUids', 'callType', 'status', 'safetyEmojis', 'createdAt', 'updatedAt']) &&
-                       incoming().keys().hasOnly(['callerId', 'callerUsername', 'calleeUsername', 'participantUids', 'callType', 'status', 'safetyEmojis', 'callerAudioB64', 'calleeAudioB64', 'callerVideoB64', 'calleeVideoB64', 'mediaSeq', 'createdAt', 'updatedAt']) &&
-                       incoming().createdAt is timestamp && incoming().createdAt <= request.time &&
-                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
-                       isValidCallSignal(incoming());
-
-      allow update: if isSignedIn() &&
-                       isValidId(callId) &&
-                       isValidCallSignal(incoming()) &&
-                       request.auth.uid in existing().participantUids &&
-                       incoming().callerId == existing().callerId &&
-                       incoming().participantUids == existing().participantUids &&
-                       incoming().createdAt == existing().createdAt &&
-                       incoming().updatedAt is timestamp && incoming().updatedAt <= request.time &&
-                       incoming().diff(existing()).affectedKeys().hasOnly(['status', 'callerAudioB64', 'calleeAudioB64', 'callerVideoB64', 'calleeVideoB64', 'mediaSeq', 'updatedAt']);
-
-      allow delete: if isSignedIn() && isValidId(callId) && request.auth.uid in existing().participantUids;
+      // Encrypted media from one side of a connected call.
+      match /media/{senderUid} {
+        allow read: if signedIn() && me() in callData(callId).participantUids;
+        allow create, update: if signedIn() && senderUid == me() &&
+                                 me() in callData(callId).participantUids &&
+                                 callData(callId).status == 'CONNECTED' &&
+                                 incoming().keys().hasOnly(['seq', 'iv', 'ciphertext', 'updatedAt']) &&
+                                 incoming().seq is int && incoming().seq >= 0 &&
+                                 str(incoming().iv, 12, 64) &&
+                                 str(incoming().ciphertext, 1, 700000) &&
+                                 incoming().updatedAt == request.time;
+        allow delete: if signedIn() && senderUid == me();
+      }
     }
   }
 }

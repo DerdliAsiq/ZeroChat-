@@ -100,33 +100,25 @@ private fun Context.findActivity(): Activity? {
     return null
 }
 
-fun getSavedLocalNodeSession(context: Context): Pair<String, String>? {
-    val currentFirebaseUser = Firebase.auth.currentUser ?: return null
-    val prefs = context.getSharedPreferences(PREFS_LOCAL_NODE, Context.MODE_PRIVATE)
-    val savedHandle = prefs.getString(KEY_LOCAL_HANDLE, null)?.takeIf { it.isNotBlank() }
-    val fallbackHandle = currentFirebaseUser.email?.substringBefore("@")
-        ?: "zero_${currentFirebaseUser.uid.take(6)}"
-    return currentFirebaseUser.uid to (savedHandle ?: fallbackHandle)
-}
+/** Handle the user typed on the sign-in screen; used once when the profile is first created. */
+fun getPreferredHandle(context: Context): String? =
+    context.getSharedPreferences(PREFS_LOCAL_NODE, Context.MODE_PRIVATE)
+        .getString(KEY_LOCAL_HANDLE, null)?.takeIf { it.isNotBlank() }
 
-fun saveLocalNodeSession(context: Context, uid: String, handle: String) {
-    val prefs = context.getSharedPreferences(PREFS_LOCAL_NODE, Context.MODE_PRIVATE)
-    prefs.edit()
-        .putString(KEY_LOCAL_UID, uid)
+private fun savePreferredHandle(context: Context, handle: String) {
+    context.getSharedPreferences(PREFS_LOCAL_NODE, Context.MODE_PRIVATE).edit()
         .putString(KEY_LOCAL_HANDLE, handle)
         .apply()
 }
 
-fun clearLocalNodeSession(context: Context) {
-    val prefs = context.getSharedPreferences(PREFS_LOCAL_NODE, Context.MODE_PRIVATE)
-    prefs.edit().clear().apply()
+fun clearPreferredHandle(context: Context) {
+    context.getSharedPreferences(PREFS_LOCAL_NODE, Context.MODE_PRIVATE).edit().clear().apply()
 }
 
 private suspend fun exchangeGoogleCredentialWithFirebase(
     context: Context,
     credential: Credential,
     preferredHandle: String,
-    onNodeSessionSuccess: (String, String) -> Unit,
     onAuthSuccess: () -> Unit,
     onAuthError: (String) -> Unit
 ) {
@@ -141,17 +133,9 @@ private suspend fun exchangeGoogleCredentialWithFirebase(
             val cleanPreferred = preferredHandle.trim()
                 .removePrefix("@")
                 .lowercase(Locale.ROOT)
-                .replace("[^a-z0-9_\\-]".toRegex(), "")
-            val finalHandle = if (cleanPreferred.length >= 3) {
-                cleanPreferred.take(24)
-            } else {
-                googleEmail.substringBefore("@")
-                    .lowercase(Locale.ROOT)
-                    .replace("[^a-z0-9_\\-]".toRegex(), "")
-                    .ifBlank { "zero_${firebaseUser.uid.take(6)}" }
-            }
-            saveLocalNodeSession(context, firebaseUser.uid, finalHandle)
-            onNodeSessionSuccess(firebaseUser.uid, finalHandle)
+                .replace("[^a-z0-9_]".toRegex(), "")
+                .take(24)
+            if (cleanPreferred.length >= 3) savePreferredHandle(context, cleanPreferred)
             onAuthSuccess()
         } else {
             onAuthError("Firebase oturumu oluşturulamadı. Lütfen tekrar deneyin.")
@@ -166,20 +150,11 @@ fun attemptAutoSignIn(
     credentialManager: CredentialManager,
     onAuthSuccess: () -> Unit,
     onUnauthenticated: () -> Unit,
-    scope: CoroutineScope,
-    onNodeSessionSuccess: (String, String) -> Unit = { _, _ -> }
+    scope: CoroutineScope
 ) {
-    val current = Firebase.auth.currentUser
-    if (current != null) {
-        val savedHandle = getSavedLocalNodeSession(context)?.second
-            ?: current.email?.substringBefore("@")
-            ?: "zero_${current.uid.take(6)}"
-        onNodeSessionSuccess(current.uid, savedHandle)
+    if (Firebase.auth.currentUser != null) {
         onAuthSuccess()
         return
-    } else {
-        // Clear any stale non-Firebase local session so user signs in cleanly with Google
-        clearLocalNodeSession(context)
     }
 
     val clientId = context.getString(R.string.default_web_client_id)
@@ -201,7 +176,6 @@ fun attemptAutoSignIn(
                 context = context,
                 credential = result.credential,
                 preferredHandle = "",
-                onNodeSessionSuccess = onNodeSessionSuccess,
                 onAuthSuccess = onAuthSuccess,
                 onAuthError = { onUnauthenticated() }
             )
@@ -223,8 +197,7 @@ fun onGoogleSignInClicked(
     onAuthSuccess: () -> Unit,
     onAuthError: (String) -> Unit,
     scope: CoroutineScope,
-    onAuthCancelled: () -> Unit = {},
-    onNodeSessionSuccess: (String, String) -> Unit = { _, _ -> }
+    onAuthCancelled: () -> Unit = {}
 ) {
     val clientId = context.getString(R.string.default_web_client_id)
     val activityContext = context.findActivity() ?: context
@@ -241,7 +214,6 @@ fun onGoogleSignInClicked(
                 context = context,
                 credential = result.credential,
                 preferredHandle = preferredHandle,
-                onNodeSessionSuccess = onNodeSessionSuccess,
                 onAuthSuccess = onAuthSuccess,
                 onAuthError = onAuthError
             )
@@ -264,8 +236,7 @@ fun onGoogleSignInClicked(
                     context = context,
                     credential = fallbackResult.credential,
                     preferredHandle = preferredHandle,
-                    onNodeSessionSuccess = onNodeSessionSuccess,
-                    onAuthSuccess = onAuthSuccess,
+                        onAuthSuccess = onAuthSuccess,
                     onAuthError = onAuthError
                 )
             } catch (cancelErr: GetCredentialCancellationException) {
@@ -290,7 +261,7 @@ fun signOutZeroChat(
     scope.launch {
         withContext(NonCancellable) {
             try {
-                context?.let { clearLocalNodeSession(it) }
+                context?.let { clearPreferredHandle(it) }
                 credentialManager.clearCredentialState(ClearCredentialStateRequest())
             } catch (e: Exception) {
                 Log.w("Auth", "Failed to clear credential state: ${e.message}")
@@ -304,8 +275,7 @@ fun signOutZeroChat(
 
 @Composable
 fun AuthScreen(
-    onAuthSuccess: () -> Unit,
-    onNodeSessionSuccess: (String, String) -> Unit = { _, _ -> }
+    onAuthSuccess: () -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -320,8 +290,7 @@ fun AuthScreen(
             credentialManager = credentialManager,
             onAuthSuccess = onAuthSuccess,
             onUnauthenticated = {},
-            scope = scope,
-            onNodeSessionSuccess = onNodeSessionSuccess
+            scope = scope
         )
     }
 
@@ -493,8 +462,7 @@ fun AuthScreen(
                                 scope = scope,
                                 onAuthCancelled = {
                                     isLoading = false
-                                },
-                                onNodeSessionSuccess = onNodeSessionSuccess
+                                }
                             )
                         },
                         enabled = !isLoading,

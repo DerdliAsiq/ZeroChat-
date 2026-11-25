@@ -53,18 +53,21 @@ import androidx.credentials.CredentialManager
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import com.example.crypto.IdentityKeyManager
 import com.example.data.local.LocalVaultDatabase
 import com.example.data.repository.ZeroChatRepository
 import com.example.ui.UiState
 import com.example.ui.ZeroChatViewModel
 import com.example.ui.auth.AuthScreen
-import com.example.ui.auth.getSavedLocalNodeSession
+import com.example.ui.auth.getPreferredHandle
 import com.example.ui.auth.signOutZeroChat
 import com.example.ui.screens.ActiveP2PCallOverlay
 import com.example.ui.screens.CallsTabScreen
@@ -87,6 +90,7 @@ import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import java.io.File
 
 internal fun FirebaseAuth.authStateFlow(): Flow<FirebaseUser?> = callbackFlow {
     val listener = FirebaseAuth.AuthStateListener { auth ->
@@ -94,6 +98,29 @@ internal fun FirebaseAuth.authStateFlow(): Flow<FirebaseUser?> = callbackFlow {
     }
     addAuthStateListener(listener)
     awaitClose { removeAuthStateListener(listener) }
+}
+
+/**
+ * Keeps one ViewModelStore per signed-in account so that switching accounts clears the previous
+ * account's ViewModel (and its Firestore listeners) while surviving configuration changes.
+ */
+class AccountScopeHolder : ViewModel() {
+    private val stores = mutableMapOf<String, ViewModelStore>()
+
+    fun ownerFor(uid: String): ViewModelStoreOwner {
+        stores.keys.filter { it != uid }.forEach { stores.remove(it)?.clear() }
+        val store = stores.getOrPut(uid) { ViewModelStore() }
+        return object : ViewModelStoreOwner {
+            override val viewModelStore: ViewModelStore = store
+        }
+    }
+
+    fun clearAll() {
+        stores.values.forEach { it.clear() }
+        stores.clear()
+    }
+
+    override fun onCleared() = clearAll()
 }
 
 class MainActivity : FragmentActivity() {
@@ -111,31 +138,19 @@ class MainActivity : FragmentActivity() {
 
 @Composable
 fun ZeroChatRootApp(auth: FirebaseAuth = Firebase.auth) {
-    val context = LocalContext.current
-    val currentUser by auth.authStateFlow().collectAsStateWithLifecycle(initialValue = auth.currentUser)
-    var localNodeSession by remember { mutableStateOf(getSavedLocalNodeSession(context)) }
-    val user = currentUser
+    val authFlow = remember(auth) { auth.authStateFlow() }
+    val user by authFlow.collectAsStateWithLifecycle(initialValue = auth.currentUser)
+    val currentUser = user
 
-    val activeUid = user?.uid ?: localNodeSession?.first
-    val activeHint = user?.email ?: localNodeSession?.second
-
-    if (activeUid == null) {
-        AuthScreen(
-            onAuthSuccess = {
-                localNodeSession = getSavedLocalNodeSession(context)
-            },
-            onNodeSessionSuccess = { uid, handle ->
-                localNodeSession = uid to handle
-            }
-        )
+    val accountScopes: AccountScopeHolder = viewModel()
+    if (currentUser == null) {
+        LaunchedEffect(Unit) { accountScopes.clearAll() }
+        AuthScreen(onAuthSuccess = {})
     } else {
-        key(activeUid) {
+        key(currentUser.uid) {
             ZeroChatAuthenticatedShell(
-                currentUserId = activeUid,
-                userEmailHint = activeHint,
-                onSignedOut = {
-                    localNodeSession = null
-                }
+                currentUserId = currentUser.uid,
+                displayNameHint = currentUser.displayName
             )
         }
     }
@@ -144,24 +159,25 @@ fun ZeroChatRootApp(auth: FirebaseAuth = Firebase.auth) {
 @Composable
 fun ZeroChatAuthenticatedShell(
     currentUserId: String,
-    userEmailHint: String?,
-    onSignedOut: () -> Unit = {}
+    displayNameHint: String?
 ) {
+    val accountScopes: AccountScopeHolder = viewModel()
+    val viewModelStoreOwner = remember(currentUserId) { accountScopes.ownerFor(currentUserId) }
+    val app = LocalContext.current.applicationContext
     val viewModel: ZeroChatViewModel = viewModel(
+        viewModelStoreOwner = viewModelStoreOwner,
         key = currentUserId,
         factory = viewModelFactory {
             initializer {
-                val app = checkNotNull(this[APPLICATION_KEY]) {
-                    "APPLICATION_KEY missing from CreationExtras"
-                }
                 val databaseId = app.getString(R.string.firestore_database_id)
                 val db = FirebaseFirestore.getInstance(databaseId)
                 val vaultDb = LocalVaultDatabase.getInstance(app)
                 ZeroChatViewModel(
-                    repository = ZeroChatRepository(db, currentUserId),
+                    repository = ZeroChatRepository(db, IdentityKeyManager(File(app.filesDir, "identity"))),
                     vaultDao = vaultDb.vaultDao(),
                     currentUserId = currentUserId,
-                    initialEmailHint = userEmailHint
+                    preferredHandle = getPreferredHandle(app),
+                    displayNameHint = displayNameHint
                 )
             }
         }
@@ -215,31 +231,30 @@ fun ZeroChatAuthenticatedShell(
     val isScreenShieldEnabled by viewModel.isScreenShieldEnabled.collectAsStateWithLifecycle()
     val isOfflineQueueMode by viewModel.isOfflineQueueMode.collectAsStateWithLifecycle()
     val pendingOutboxItems by viewModel.pendingOutboxItems.collectAsStateWithLifecycle()
-    val cachedVaultMessages by viewModel.cachedVaultMessages.collectAsStateWithLifecycle()
+    val cachedMessageCount by viewModel.cachedMessageCount.collectAsStateWithLifecycle()
     val starredVaultMessages by viewModel.starredVaultMessages.collectAsStateWithLifecycle()
     val exportedVaultBackupText by viewModel.exportedVaultBackupText.collectAsStateWithLifecycle()
     val bannerMessage by viewModel.statusBannerMessage.collectAsStateWithLifecycle()
-    val latestNotificationEvent by viewModel.latestNotificationEvent.collectAsStateWithLifecycle()
 
-    // Trigger real Android System Notifications when incoming messages, requests, or calls arrive
-    LaunchedEffect(latestNotificationEvent) {
-        val evt = latestNotificationEvent ?: return@LaunchedEffect
-        if (evt.isCall) {
-            ZeroChatNotificationHelper.showIncomingCallNotification(
-                context = context,
-                notificationId = evt.id,
-                callerUsername = evt.title.removePrefix("📞 @").removePrefix("@").substringBefore(" "),
-                isVideo = evt.isVideoCall
-            )
-        } else {
-            ZeroChatNotificationHelper.showMessageNotification(
-                context = context,
-                notificationId = evt.id,
-                senderTitle = evt.title,
-                messagePreview = evt.body
-            )
+    // Real Android notifications for incoming messages, requests and calls (one per event).
+    LaunchedEffect(viewModel) {
+        viewModel.notificationEvents.collect { evt ->
+            if (evt.isCall) {
+                ZeroChatNotificationHelper.showIncomingCallNotification(
+                    context = context,
+                    notificationId = evt.id,
+                    callerUsername = evt.callerUsername,
+                    isVideo = evt.isVideoCall
+                )
+            } else {
+                ZeroChatNotificationHelper.showMessageNotification(
+                    context = context,
+                    notificationId = evt.id,
+                    senderTitle = evt.title,
+                    messagePreview = evt.body
+                )
+            }
         }
-        viewModel.consumeNotificationEvent()
     }
 
     // Automatic Vault Lock when app moves to background (ON_STOP)
@@ -282,9 +297,10 @@ fun ZeroChatAuthenticatedShell(
     }
 
     // Full-screen Active P2P Call Overlay takes precedence
-    if (activeCall != null) {
+    val currentCall = activeCall
+    if (currentCall != null) {
         ActiveP2PCallOverlay(
-            callSignal = activeCall!!,
+            callSignal = currentCall,
             currentUserId = currentUserId,
             myUsername = myProfile?.username,
             onPushMediaChunk = viewModel::pushActiveCallMediaChunk,
@@ -294,11 +310,12 @@ fun ZeroChatAuthenticatedShell(
     }
 
     // Full-screen Incoming P2P Call Ringing Overlay
-    if (incomingRingingCall != null) {
+    val ringingCall = incomingRingingCall
+    if (ringingCall != null) {
         IncomingCallRingingOverlay(
-            callSignal = incomingRingingCall!!,
-            onAcceptCall = { viewModel.acceptIncomingCall(incomingRingingCall!!) },
-            onDeclineCall = { viewModel.declineIncomingCall(incomingRingingCall!!) }
+            callSignal = ringingCall,
+            onAcceptCall = { viewModel.acceptIncomingCall(ringingCall) },
+            onDeclineCall = { viewModel.declineIncomingCall(ringingCall) }
         )
         return
     }
@@ -418,6 +435,9 @@ fun ZeroChatAuthenticatedShell(
                     directoryPeers = directoryPeersList,
                     isRoomPeerVerified = verifiedPeerHandles.contains(peerHandleInRoom),
                     hasRoomKeyChangedWarning = keyChangedPeerHandles.contains(peerHandleInRoom),
+                    safetyInfo = remember(activeRoom.id, activeRoom.participantUids, myProfile, directoryState) {
+                        viewModel.safetyInfoFor(activeRoom)
+                    },
                     scheduledEnvelopes = activeRoomScheduledEnvelopes,
                     inChatSearchQuery = inChatSearchQuery,
                     onInChatSearchQueryChange = viewModel::updateInChatSearchQuery,
@@ -446,8 +466,8 @@ fun ZeroChatAuthenticatedShell(
                     onSendVoiceNote = { dur, wave, b64, ttl ->
                         viewModel.sendVoiceNoteMessage(dur, wave, b64, ttl)
                     },
-                    onSendImageAttachment = { uri, cap, ttl, isViewOnce, stegoSecret ->
-                        viewModel.sendImageAttachmentMessage(uri, cap, ttl, isViewOnce, stegoSecret)
+                    onSendImageAttachment = { uri, cap, ttl, isViewOnce ->
+                        viewModel.sendImageAttachmentMessage(uri, cap, ttl, isViewOnce)
                     },
                     onSendFileAttachment = { name, sizeKb, mime, fileB64, ttl ->
                         viewModel.sendFileAttachmentMessage(name, sizeKb, mime, fileB64, ttl)
@@ -535,7 +555,7 @@ fun ZeroChatAuthenticatedShell(
                             biometricUnlockEnabled = securityConfig?.biometricUnlockEnabled ?: true,
                             autoLockOnBackground = securityConfig?.autoLockOnBackground ?: true,
                             pendingOutboxCount = pendingOutboxItems.size,
-                            cachedMessagesCount = cachedVaultMessages.size,
+                            cachedMessagesCount = cachedMessageCount,
                             starredMessages = starredVaultMessages,
                             exportedVaultBackupText = exportedVaultBackupText,
                             onToggleScreenShield = viewModel::toggleScreenShield,
@@ -556,12 +576,13 @@ fun ZeroChatAuthenticatedShell(
                             onUpdateVaultPins = viewModel::updateVaultPins,
                             onVerifyPin = viewModel::verifyPinInput,
                             onSignOut = {
-                                signOutZeroChat(
-                                    credentialManager = credentialManager,
-                                    scope = scope,
-                                    context = context,
-                                    onSignOutComplete = onSignedOut
-                                )
+                                viewModel.prepareSignOut {
+                                    signOutZeroChat(
+                                        credentialManager = credentialManager,
+                                        scope = scope,
+                                        context = context
+                                    )
+                                }
                             }
                         )
                     }

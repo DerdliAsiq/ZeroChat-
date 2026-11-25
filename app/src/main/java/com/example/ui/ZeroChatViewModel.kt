@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.crypto.CryptoEngine
 import com.example.crypto.HardwareKeyStatus
 import com.example.data.local.CachedVaultMessageEntity
+import com.example.data.local.HiddenRoomEntity
 import com.example.data.local.LocalVaultDao
 import com.example.data.local.LockedRoomEntity
 import com.example.data.local.PendingOutboxEntity
@@ -13,30 +14,56 @@ import com.example.data.local.PinnedRoomEntity
 import com.example.data.local.ScheduledEnvelopeEntity
 import com.example.data.local.VaultSecurityConfigEntity
 import com.example.data.local.VerifiedPeerEntity
+import com.example.data.model.AnnotationKind
 import com.example.data.model.CallSignal
+import com.example.data.model.CallStatus
 import com.example.data.model.ChatRoom
 import com.example.data.model.DecryptedMessageItem
 import com.example.data.model.DecryptedStatusItem
 import com.example.data.model.EncryptedEnvelope
+import com.example.data.model.EncryptedStatus
 import com.example.data.model.PollOptionItem
+import com.example.data.model.RoomAnnotation
+import com.example.data.model.RoomPresence
 import com.example.data.model.UserProfile
+import com.example.data.repository.OpenedEnvelope
 import com.example.data.repository.ZeroChatRepository
-import com.google.firebase.firestore.FirebaseFirestoreException
+import com.example.data.repository.userMessage
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.mapLatest
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 
 sealed interface UiState<out T> {
     data object Loading : UiState<Nothing>
@@ -44,15 +71,19 @@ sealed interface UiState<out T> {
     data class Error(val message: String) : UiState<Nothing>
 }
 
+/** Safety number and emojis for a direct conversation, derived from both identity keys. */
+data class SafetyInfo(val safetyNumber: String, val emojis: String, val peerUsername: String)
+
+@OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
 class ZeroChatViewModel(
     private val repository: ZeroChatRepository,
     private val vaultDao: LocalVaultDao,
     val currentUserId: String,
-    initialEmailHint: String?
+    private val preferredHandle: String?,
+    private val displayNameHint: String?
 ) : ViewModel() {
 
-    private val _myProfile = MutableStateFlow<UserProfile?>(null)
-    val myProfile: StateFlow<UserProfile?> = _myProfile.asStateFlow()
+    // ------------------------------------------------------------------ simple UI state
 
     private val _hardwareKeyStatus = MutableStateFlow<HardwareKeyStatus?>(null)
     val hardwareKeyStatus: StateFlow<HardwareKeyStatus?> = _hardwareKeyStatus.asStateFlow()
@@ -71,9 +102,6 @@ class ZeroChatViewModel(
 
     private val _editingMessage = MutableStateFlow<DecryptedMessageItem?>(null)
     val editingMessage: StateFlow<DecryptedMessageItem?> = _editingMessage.asStateFlow()
-
-    private val _activeCall = MutableStateFlow<CallSignal?>(null)
-    val activeCall: StateFlow<CallSignal?> = _activeCall.asStateFlow()
 
     private val _isVaultUnlocked = MutableStateFlow(false)
     val isVaultUnlocked: StateFlow<Boolean> = _isVaultUnlocked.asStateFlow()
@@ -95,557 +123,660 @@ class ZeroChatViewModel(
         val title: String,
         val body: String,
         val isCall: Boolean = false,
-        val isVideoCall: Boolean = false
+        val isVideoCall: Boolean = false,
+        val callerUsername: String = ""
     )
 
-    private val _latestNotificationEvent = MutableStateFlow<SystemNotificationEvent?>(null)
-    val latestNotificationEvent: StateFlow<SystemNotificationEvent?> = _latestNotificationEvent.asStateFlow()
+    /** One-shot notification events; every event is delivered exactly once. */
+    private val notificationChannel = Channel<SystemNotificationEvent>(Channel.BUFFERED)
+    val notificationEvents: Flow<SystemNotificationEvent> = notificationChannel.receiveAsFlow()
 
-    fun consumeNotificationEvent() {
-        _latestNotificationEvent.value = null
+    private fun banner(message: String) {
+        _statusBannerMessage.value = message
     }
 
-    private val notifiedRoomTimestamps = mutableMapOf<String, Long>()
-    private val notifiedCallIds = mutableSetOf<String>()
-    private var initialRoomsSnapshotLoaded = false
+    fun clearBannerMessage() {
+        _statusBannerMessage.value = null
+    }
 
-    private val _clockTickMillis = MutableStateFlow(System.currentTimeMillis())
+    fun postBannerMessage(message: String) = banner(message)
 
-    private val _rawRoomEnvelopes = MutableStateFlow<List<EncryptedEnvelope>>(emptyList())
-    private var roomEnvelopesJob: Job? = null
-    private var typingResetJob: Job? = null
-    private val burnedIdsInSession = mutableSetOf<String>()
-    private val markedReadIdsInSession = mutableSetOf<String>()
+    // ------------------------------------------------------------------ local (Room) state
 
     val securityConfig: StateFlow<VaultSecurityConfigEntity?> = vaultDao.observeSecurityConfig(currentUserId)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), null)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
-    val isScreenShieldEnabled: StateFlow<Boolean> = combine(
-        securityConfig,
-        _isVaultUnlocked,
-        _isPanicModeActive
-    ) { cfg, unlocked, panic ->
+    val isScreenShieldEnabled: StateFlow<Boolean> = combine(securityConfig, _isVaultUnlocked, _isPanicModeActive) { cfg, unlocked, panic ->
         (cfg?.screenShieldEnabled == true) || unlocked || panic
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), false)
-
-    private val dismissedCallIdsInSession = mutableSetOf<String>()
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, true)
 
     val pendingOutboxItems: StateFlow<List<PendingOutboxEntity>> = vaultDao.observePendingOutbox(currentUserId)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
 
-    val cachedVaultMessages: StateFlow<List<CachedVaultMessageEntity>> = vaultDao.observeCachedMessages(currentUserId)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
+    val cachedMessageCount: StateFlow<Int> = combine(vaultDao.observeCachedMessageCount(currentUserId), _isPanicModeActive) { n, panic ->
+        if (panic) 0 else n
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), 0)
 
-    val starredVaultMessages: StateFlow<List<CachedVaultMessageEntity>> = vaultDao.observeStarredMessages(currentUserId)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
+    val starredVaultMessages: StateFlow<List<CachedVaultMessageEntity>> =
+        combine(vaultDao.observeStarredMessages(currentUserId), _isPanicModeActive) { list, panic ->
+            if (panic) emptyList() else list
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
 
-    val lockedRoomIds: StateFlow<Set<String>> = vaultDao.observeLockedRooms()
-        .combine(_clockTickMillis) { list, _ -> list.filter { it.isSecretVault }.map { it.roomId }.toSet() }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptySet())
+    val lockedRoomIds: StateFlow<Set<String>> = vaultDao.observeLockedRooms(currentUserId)
+        .map { list -> list.map { it.roomId }.toSet() }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
 
     val pinnedRoomIds: StateFlow<Set<String>> = vaultDao.observePinnedRooms(currentUserId)
-        .combine(_clockTickMillis) { list, _ -> list.map { it.roomId }.toSet() }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptySet())
+        .map { list -> list.map { it.roomId }.toSet() }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
+
+    private val hiddenRooms: StateFlow<Map<String, Long>> = vaultDao.observeHiddenRooms(currentUserId)
+        .map { list -> list.associate { it.roomId to it.hiddenAtMillis } }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
 
     val verifiedPeers: StateFlow<List<VerifiedPeerEntity>> = vaultDao.observeVerifiedPeers(currentUserId)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
-
-    val verifiedPeerHandles: StateFlow<Set<String>> = verifiedPeers
-        .combine(_clockTickMillis) { list, _ -> list.map { it.peerUsername.lowercase(Locale.ROOT) }.toSet() }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptySet())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val scheduledEnvelopes: StateFlow<List<ScheduledEnvelopeEntity>> = vaultDao.observeScheduledEnvelopes(currentUserId)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
-    val activeRoomScheduledEnvelopes: StateFlow<List<ScheduledEnvelopeEntity>> = combine(
-        scheduledEnvelopes,
-        _selectedRoom
-    ) { list, room ->
-        if (room == null) emptyList() else list.filter { it.roomId == room.id }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
+    val activeRoomScheduledEnvelopes: StateFlow<List<ScheduledEnvelopeEntity>> =
+        combine(scheduledEnvelopes, _selectedRoom) { list, room ->
+            if (room == null) emptyList() else list.filter { it.roomId == room.id }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
 
-    val directoryUsersState: StateFlow<UiState<List<UserProfile>>> = repository.observeDirectoryUsers()
-        .combine(_searchQuery) { users, query ->
-            val q = query.trim().removePrefix("@").lowercase(Locale.ROOT)
-            val me = users.firstOrNull { it.userId == currentUserId }
-            if (me != null && _myProfile.value == null) {
-                _myProfile.value = me
-            }
-            val filtered = if (q.isEmpty()) {
-                users.filter { it.userId != currentUserId }
-            } else {
-                users.filter {
-                    it.userId != currentUserId &&
-                        (it.username.lowercase(Locale.ROOT).contains(q) ||
-                            it.displayName.lowercase(Locale.ROOT).contains(q))
-                }
-            }
-            UiState.Success(filtered) as UiState<List<UserProfile>>
-        }
-        .catch { error ->
-            val firestoreError = generateSequence(error) { it.cause }
-                .filterIsInstance<FirebaseFirestoreException>()
-                .firstOrNull()
-            if (firestoreError == null && error is CancellationException) throw error
-            val rootError = firestoreError ?: error
-            Log.w(TAG, "Error observing directory users", rootError)
-            emit(UiState.Error(rootError.message ?: "Kullanıcı dizini yüklenemedi"))
-        }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+    // ------------------------------------------------------------------ profile & identity
 
-    val keyChangedPeerHandles: StateFlow<Set<String>> = combine(
-        directoryUsersState,
-        verifiedPeers
-    ) { dirState, verifiedList ->
-        val changed = mutableSetOf<String>()
-        if (dirState is UiState.Success) {
-            val peersByHandle = dirState.data.associateBy { it.username.lowercase(Locale.ROOT) }
-            verifiedList.forEach { v ->
-                val handle = v.peerUsername.lowercase(Locale.ROOT)
-                val livePeer = peersByHandle[handle]
-                if (livePeer != null &&
-                    v.verifiedPublicKey.isNotBlank() &&
-                    livePeer.publicKey.isNotBlank() &&
-                    livePeer.publicKey != v.verifiedPublicKey
-                ) {
-                    changed.add(handle)
-                }
+    private val _myProfile = MutableStateFlow<UserProfile?>(null)
+    val myProfile: StateFlow<UserProfile?> = _myProfile.asStateFlow()
+
+    private val myHandle: String
+        get() = _myProfile.value?.username ?: "zero_${currentUserId.take(6).lowercase(Locale.ROOT)}"
+
+    // ------------------------------------------------------------------ rooms & contacts
+
+    private val roomsRaw: StateFlow<UiState<List<ChatRoom>>> = repository.observeUserRooms()
+        .map { UiState.Success(it) as UiState<List<ChatRoom>> }
+        .catch { error -> emitError(error, "Sohbetler yüklenemedi") }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
+
+    private val _searchResults = MutableStateFlow<List<UserProfile>>(emptyList())
+
+    /** Uids whose profiles we keep live: everyone we share a room with plus search hits. */
+    private val contactUids: Flow<Set<String>> = combine(roomsRaw, _searchResults) { roomsState, search ->
+        val roomUids = (roomsState as? UiState.Success)?.data?.flatMap { it.participantUids }.orEmpty()
+        (roomUids + search.map { it.userId } + currentUserId).toSet()
+    }.distinctUntilChanged()
+
+    val profilesByUid: StateFlow<Map<String, UserProfile>> = contactUids
+        .debounce(150)
+        .flatMapLatest { uids ->
+            repository.observeProfiles(uids).catch { e ->
+                Log.w(TAG, "profiles listener failed", e)
+                emit(emptyMap())
             }
         }
-        changed
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptySet())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
 
-    val peerTypingHandleInActiveRoom: StateFlow<String?> = combine(
-        directoryUsersState,
-        _selectedRoom
-    ) { dirState, room ->
-        if (room == null || dirState !is UiState.Success) return@combine null
-        val typingPeer = dirState.data.firstOrNull { peer ->
-            peer.userId != currentUserId &&
-                room.participantUids.contains(peer.userId) &&
-                peer.onlineStatus == "TYPING:${room.id}"
-        }
-        typingPeer?.username
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), null)
+    private val previewCache = ConcurrentHashMap<String, String>()
 
     val roomsState: StateFlow<UiState<List<ChatRoom>>> = combine(
-        repository.observeUserRooms(currentUserId),
-        _isPanicModeActive,
-        pinnedRoomIds
-    ) { rooms, panic, pinnedSet ->
-        if (panic) {
-            UiState.Success(emptyList<ChatRoom>()) as UiState<List<ChatRoom>>
-        } else {
-            val myHandle = _myProfile.value?.username?.trim()?.lowercase(Locale.ROOT).orEmpty()
-            val nowMs = System.currentTimeMillis()
-            if (!initialRoomsSnapshotLoaded) {
-                rooms.forEach { r ->
-                    val ts = (r.updatedAt ?: r.createdAt)?.toDate()?.time ?: nowMs
-                    notifiedRoomTimestamps[r.id] = ts
-                }
-                initialRoomsSnapshotLoaded = true
-            } else {
-                rooms.forEach { r ->
-                    val ts = (r.updatedAt ?: r.createdAt)?.toDate()?.time ?: 0L
-                    val prevTs = notifiedRoomTimestamps[r.id] ?: 0L
-                    if (ts > prevTs) {
-                        notifiedRoomTimestamps[r.id] = ts
-                        val senderLower = r.lastSenderName.trim().removePrefix("@").lowercase(Locale.ROOT)
-                        val isFromOther = senderLower.isNotBlank() && senderLower != myHandle
-                        val isNotCurrentlyOpen = _selectedRoom.value?.id != r.id
-                        if (isFromOther && isNotCurrentlyOpen && (nowMs - ts) < 120_000L) {
-                            val previewText = CryptoEngine.decryptPreviewPacket(r.lastCipherPreview, r.roomKeyHint)
-                            val titleText = if (r.isPendingRequest) {
-                                "Yeni Sohbet İsteği: @${r.lastSenderName.removePrefix("@")}"
-                            } else {
-                                "@${r.lastSenderName.removePrefix("@")}"
-                            }
-                            _latestNotificationEvent.value = SystemNotificationEvent(
-                                id = r.id.hashCode(),
-                                title = titleText,
-                                body = previewText,
-                                isCall = false
-                            )
-                        }
-                    }
-                }
-            }
-
-            val currentSel = _selectedRoom.value
-            if (currentSel != null) {
-                rooms.firstOrNull { it.id == currentSel.id }?.let { _selectedRoom.value = it }
-            }
-            val sorted = rooms.sortedWith(
-                compareByDescending<ChatRoom> { pinnedSet.contains(it.id) }
-                    .thenByDescending { (it.updatedAt ?: it.createdAt)?.toDate()?.time ?: 0L }
+        roomsRaw, profilesByUid, _isPanicModeActive, pinnedRoomIds, hiddenRooms
+    ) { state, profiles, panic, pinned, hidden ->
+        Snapshot(state, profiles, panic, pinned, hidden)
+    }.mapLatest { snap ->
+        val state = snap.state
+        if (state !is UiState.Success) return@mapLatest state
+        if (snap.panic) return@mapLatest UiState.Success(emptyList<ChatRoom>())
+        val decorated = state.data
+            .filter { room -> snap.hidden[room.id]?.let { hiddenAt -> room.activityMillis > hiddenAt } ?: true }
+            .map { room -> decorateRoom(room, snap.profiles) }
+            .sortedWith(
+                compareByDescending<ChatRoom> { snap.pinned.contains(it.id) }.thenByDescending { it.activityMillis }
             )
-            UiState.Success(sorted) as UiState<List<ChatRoom>>
+        UiState.Success(decorated) as UiState<List<ChatRoom>>
+    }.flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
+
+    private data class Snapshot(
+        val state: UiState<List<ChatRoom>>,
+        val profiles: Map<String, UserProfile>,
+        val panic: Boolean,
+        val pinned: Set<String>,
+        val hidden: Map<String, Long>
+    )
+
+    private suspend fun decorateRoom(room: ChatRoom, profiles: Map<String, UserProfile>): ChatRoom {
+        val names = room.participantUids.mapNotNull { profiles[it]?.username }
+        val previewKey = "${room.id}|${room.lastPreviewCt.ifBlank { room.lastCipherPreview }}"
+        val preview = previewCache[previewKey] ?: (repository.decryptPreview(room) ?: "").also {
+            if (it.isNotBlank()) previewCache[previewKey] = it
         }
+        val peerTitle = if (!room.isGroup) {
+            room.peerUidFor(currentUserId)?.let { profiles[it]?.username }?.let { "@$it" }
+        } else {
+            null
+        }
+        return room.copy(
+            participantNames = if (names.size == room.participantUids.size) names.joinToString(",") else room.participantNames,
+            title = peerTitle ?: room.title,
+            previewText = preview.ifBlank { if (room.isPendingRequest) "🤝 Sohbet isteği" else "🔒 Şifreli sohbet" },
+            lastSenderName = profiles[room.lastSenderUid]?.username.orEmpty(),
+            requesterUsername = profiles[room.requesterUid]?.username.orEmpty()
+        )
     }
-        .catch { error ->
-            val firestoreError = generateSequence(error) { it.cause }
-                .filterIsInstance<FirebaseFirestoreException>()
-                .firstOrNull()
-            if (firestoreError == null && error is CancellationException) throw error
-            val rootError = firestoreError ?: error
-            Log.w(TAG, "Error observing user rooms", rootError)
-            emit(UiState.Error(rootError.message ?: "Sohbetler yüklenemedi"))
+
+    val directoryUsersState: StateFlow<UiState<List<UserProfile>>> = combine(
+        profilesByUid, _searchResults, _searchQuery, _isPanicModeActive
+    ) { profiles, search, query, panic ->
+        if (panic) return@combine UiState.Success(emptyList<UserProfile>())
+        val q = query.trim().removePrefix("@").lowercase(Locale.ROOT)
+        val all = (profiles.values + search).distinctBy { it.userId }.filter { it.userId != currentUserId }
+        val filtered = if (q.isEmpty()) all else all.filter {
+            it.username.lowercase(Locale.ROOT).contains(q) || it.displayName.lowercase(Locale.ROOT).contains(q)
         }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+        UiState.Success(filtered.sortedBy { it.username }) as UiState<List<UserProfile>>
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
 
-    val activeRoomMessages: StateFlow<List<DecryptedMessageItem>> = combine(
-        _rawRoomEnvelopes,
-        _selectedRoom,
-        _clockTickMillis,
-        _inChatSearchQuery
-    ) { envelopes, room, nowMillis, searchQ ->
-        if (room == null) return@combine emptyList()
-        val toCache = mutableListOf<CachedVaultMessageEntity>()
+    /** Handles of peers whose identity keys were verified and still match. */
+    val verifiedPeerHandles: StateFlow<Set<String>> = combine(verifiedPeers, profilesByUid) { verified, profiles ->
+        verified.mapNotNull { v ->
+            val p = profiles[v.peerUid] ?: return@mapNotNull null
+            if (CryptoEngine.identityKeyId(p.publicKey, p.signingKey) == v.verifiedKeyId) p.username.lowercase(Locale.ROOT) else null
+        }.toSet()
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptySet())
 
-        val decryptedList = envelopes.mapNotNull { env ->
-            val createdMillis = (env.createdAt ?: env.updatedAt)?.toDate()?.time ?: nowMillis
-            val remainingSec: Long? = if (env.ttlSeconds > 0L) {
-                val expireMillis = createdMillis + (env.ttlSeconds * 1000L)
-                val diffSec = (expireMillis - nowMillis) / 1000L
-                if (diffSec <= 0L) {
-                    if (burnedIdsInSession.add(env.id)) {
-                        viewModelScope.launch { repository.burnEnvelope(env.id) }
-                    }
-                    return@mapNotNull null
-                }
-                diffSec
+    /** Handles of verified peers whose identity keys changed since verification. */
+    val keyChangedPeerHandles: StateFlow<Set<String>> = combine(verifiedPeers, profilesByUid) { verified, profiles ->
+        verified.mapNotNull { v ->
+            val p = profiles[v.peerUid] ?: return@mapNotNull null
+            if (p.hasE2eeKeys && CryptoEngine.identityKeyId(p.publicKey, p.signingKey) != v.verifiedKeyId) {
+                p.username.lowercase(Locale.ROOT)
             } else {
                 null
             }
+        }.toSet()
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptySet())
 
-            val metaObj = try {
-                JSONObject(env.encryptedMeta)
-            } catch (_: Exception) {
-                JSONObject()
-            }
-            val ratchetStep = metaObj.optInt("ratchetStep", 0)
-            val plaintext = CryptoEngine.decrypt(env.ciphertext, env.iv, room.roomKeyHint, ratchetStep)
+    // ------------------------------------------------------------------ active room
 
-            val replySender = metaObj.optString("replyToSender", "").takeIf { it.isNotBlank() }
-            val replyPreview = metaObj.optString("replyToPreview", "").takeIf { it.isNotBlank() }
-            val isPinned = metaObj.optBoolean("isPinned", false)
-            val isEdited = metaObj.optBoolean("isEdited", false)
-            val isViewOnce = metaObj.optBoolean("isViewOnce", false)
-            val isSpoiler = metaObj.optBoolean("isSpoiler", false)
-            val isStarred = metaObj.optBoolean("isStarred", false)
-            val stegoPayload = metaObj.optString("stegoPayload", "")
-            val forwardedFrom = metaObj.optString("forwardedFrom", "").takeIf { it.isNotBlank() }
-            val audioB64 = metaObj.optString("audioBase64", "")
-            val fileName = metaObj.optString("fileName", "")
-            val fileSizeKb = metaObj.optInt("fileSizeKb", 0)
-            val fileB64 = metaObj.optString("fileBase64", "")
-            val fileMime = metaObj.optString("fileMime", "application/octet-stream")
-
-            val readArr = metaObj.optJSONArray("readByUids")
-            val readUids = mutableSetOf<String>()
-            readUids.add(env.senderId)
-            if (readArr != null) {
-                for (i in 0 until readArr.length()) {
-                    readUids.add(readArr.optString(i))
-                }
-            }
-
-            // Automatically send read receipt if incoming message not yet marked read by currentUserId
-            if (env.senderId != currentUserId && !readUids.contains(currentUserId) && markedReadIdsInSession.add(env.id)) {
-                readUids.add(currentUserId)
-                viewModelScope.launch {
-                    markMessageAsReadInternal(env, metaObj, readUids)
-                }
-            }
-
-            toCache.add(
-                CachedVaultMessageEntity(
-                    messageId = env.id,
-                    ownerUid = currentUserId,
-                    roomId = room.id,
-                    roomTitle = room.title,
-                    senderUsername = env.senderUsername,
-                    decryptedText = plaintext,
-                    ciphertext = env.ciphertext,
-                    iv = env.iv,
-                    messageType = env.messageType,
-                    isStarred = isStarred,
-                    createdAtMillis = createdMillis
-                )
-            )
-
-            DecryptedMessageItem(
-                id = env.id,
-                roomId = env.roomId,
-                senderId = env.senderId,
-                senderUsername = env.senderUsername,
-                decryptedText = plaintext,
-                ciphertext = env.ciphertext,
-                iv = env.iv,
-                signatureHash = env.signatureHash,
-                messageType = env.messageType,
-                encryptedMeta = env.encryptedMeta,
-                reactions = parseReactionsMap(env.reactionsSummary),
-                ttlSeconds = env.ttlSeconds,
-                createdAtMillis = createdMillis,
-                remainingSeconds = remainingSec,
-                replyToSender = replySender,
-                replyToPreview = replyPreview,
-                isPinned = isPinned,
-                isEdited = isEdited,
-                forwardedFrom = forwardedFrom,
-                readByCount = readUids.size,
-                ratchetStep = ratchetStep,
-                audioBase64 = audioB64,
-                fileName = fileName,
-                fileSizeKb = fileSizeKb,
-                fileBase64 = fileB64,
-                fileMime = fileMime,
-                isViewOnce = isViewOnce,
-                isSpoiler = isSpoiler,
-                isStarred = isStarred,
-                stegoPayload = stegoPayload
-            )
+    private val ticker: Flow<Long> = flow {
+        while (true) {
+            emit(System.currentTimeMillis())
+            delay(1000L)
         }
+    }
 
-        if (toCache.isNotEmpty()) {
-            viewModelScope.launch {
-                vaultDao.cacheDecryptedMessages(toCache)
+    private val selectedRoomId: Flow<String?> = _selectedRoom.map { it?.id }.distinctUntilChanged()
+
+    private val presenceInRoom: StateFlow<List<RoomPresence>> = selectedRoomId.flatMapLatest { id ->
+        if (id == null) flowOf(emptyList()) else repository.observePresence(id).catch { emit(emptyList()) }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
+
+    val peerTypingHandleInActiveRoom: StateFlow<String?> = combine(presenceInRoom, profilesByUid, ticker) { presence, profiles, now ->
+        presence.firstOrNull { p ->
+            p.uid != currentUserId && (p.typingAt?.toDate()?.time ?: 0L) > now - TYPING_WINDOW_MS
+        }?.let { profiles[it.uid]?.username }
+    }.distinctUntilChanged().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), null)
+
+    private val openedCache = ConcurrentHashMap<String, OpenedEnvelope>()
+    private val expiredHandled = ConcurrentHashMap.newKeySet<String>()
+    private val cachedToVault = ConcurrentHashMap.newKeySet<String>()
+
+    private data class RoomInputs(
+        val room: ChatRoom,
+        val envelopes: List<EncryptedEnvelope>,
+        val annotations: List<RoomAnnotation>,
+        val presence: List<RoomPresence>,
+        val starred: Set<String>,
+        val profiles: Map<String, UserProfile>
+    )
+
+    private val decryptedRoomMessages: StateFlow<List<DecryptedMessageItem>> = _selectedRoom
+        .distinctUntilChanged { a, b -> a?.id == b?.id && a?.roomKeyHint == b?.roomKeyHint }
+        .flatMapLatest { room ->
+            if (room == null) return@flatMapLatest flowOf(emptyList())
+            combine(
+                repository.observeRoomEnvelopes(room.id).catch { e ->
+                    banner("Mesajlar yüklenemedi: ${e.userMessage()}")
+                    emit(emptyList())
+                },
+                repository.observeAnnotations(room.id).catch { emit(emptyList()) },
+                presenceInRoom,
+                vaultDao.observeStarredIdsInRoom(currentUserId, room.id).map { it.toSet() },
+                profilesByUid
+            ) { envs, anns, presence, starred, profiles ->
+                RoomInputs(room, envs, anns, presence, starred, profiles)
+            }.mapLatest { inputs -> buildMessages(inputs) }
+        }
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
+
+    /** Decrypted messages of the open room, with live countdowns; expired messages are removed. */
+    val activeRoomMessages: StateFlow<List<DecryptedMessageItem>> = combine(
+        decryptedRoomMessages,
+        _inChatSearchQuery,
+        decryptedRoomMessages.flatMapLatest { list ->
+            if (list.any { it.ttlSeconds > 0L }) ticker else flowOf(0L)
+        }
+    ) { list, query, now ->
+        val clock = if (now == 0L) System.currentTimeMillis() else now
+        val visible = list.mapNotNull { msg ->
+            if (msg.ttlSeconds <= 0L) return@mapNotNull msg
+            val remaining = (msg.createdAtMillis + msg.ttlSeconds * 1000L - clock) / 1000L
+            if (remaining <= 0L) {
+                onMessageExpired(msg)
+                null
+            } else {
+                msg.copy(remainingSeconds = remaining)
             }
         }
-
-        val q = searchQ.trim().lowercase(Locale.ROOT)
-        if (q.isEmpty()) {
-            decryptedList
-        } else {
-            decryptedList.filter {
-                it.decryptedText.lowercase(Locale.ROOT).contains(q) ||
-                    it.senderUsername.lowercase(Locale.ROOT).contains(q) ||
-                    it.fileName.lowercase(Locale.ROOT).contains(q)
-            }
+        val q = query.trim().lowercase(Locale.ROOT)
+        if (q.isEmpty()) visible else visible.filter {
+            it.decryptedText.lowercase(Locale.ROOT).contains(q) ||
+                it.senderUsername.lowercase(Locale.ROOT).contains(q) ||
+                it.fileName.lowercase(Locale.ROOT).contains(q)
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
 
-    val statusesState: StateFlow<UiState<List<DecryptedStatusItem>>> = repository.observeStatuses()
-        .combine(_isPanicModeActive) { list, panic ->
-            if (panic) {
-                UiState.Success(emptyList<DecryptedStatusItem>()) as UiState<List<DecryptedStatusItem>>
-            } else {
-                val now = System.currentTimeMillis()
-                val dayMillis = 24 * 60 * 60 * 1000L
-                val activeItems = list.mapNotNull { st ->
-                    val created = (st.createdAt ?: st.updatedAt)?.toDate()?.time ?: now
-                    if (now - created > dayMillis) return@mapNotNull null
-                    val decrypted = CryptoEngine.decrypt(st.ciphertext, st.iv, "ZEROCHAT_PUBLIC_STATUS_STREAM")
-                    DecryptedStatusItem(
-                        id = st.id,
-                        userId = st.userId,
-                        authorUsername = st.authorUsername,
-                        decryptedContent = decrypted,
-                        ciphertext = st.ciphertext,
-                        iv = st.iv,
-                        themeColorHex = st.themeColorHex,
-                        viewCount = st.viewCount,
-                        createdAtMillis = created
-                    )
-                }
-                UiState.Success(activeItems) as UiState<List<DecryptedStatusItem>>
-            }
+    private fun onMessageExpired(msg: DecryptedMessageItem) {
+        if (!expiredHandled.add(msg.id)) return
+        viewModelScope.launch {
+            vaultDao.deleteCachedMessages(listOf(msg.id))
+            // Rules allow any participant to delete an envelope once its expireAt has passed;
+            // the Firestore TTL policy removes it server-side even if no client is online.
+            repository.deleteMessage(msg.id)
         }
-        .catch { error ->
-            val firestoreError = generateSequence(error) { it.cause }
-                .filterIsInstance<FirebaseFirestoreException>()
-                .firstOrNull()
-            if (firestoreError == null && error is CancellationException) throw error
-            val rootError = firestoreError ?: error
-            Log.w(TAG, "Error observing statuses", rootError)
-            emit(UiState.Error(rootError.message ?: "Durum güncellemeleri alınamadı"))
-        }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+    }
 
-    val callSignalsState: StateFlow<UiState<List<CallSignal>>> = repository.observeCallSignals(currentUserId)
-        .combine(_isPanicModeActive) { calls, panic ->
-            if (panic) {
-                UiState.Success(emptyList<CallSignal>()) as UiState<List<CallSignal>>
-            } else {
-                // Keep _activeCall synchronized in real time with remote accept / media / end updates
-                val currentActive = _activeCall.value
-                if (currentActive != null) {
-                    val liveMatch = calls.firstOrNull { it.id == currentActive.id }
-                    if (liveMatch != null) {
-                        if (liveMatch.status == "ENDED") {
-                            _activeCall.value = null
-                            _statusBannerMessage.value = "Arama sonlandırıldı"
-                        } else {
-                            _activeCall.value = liveMatch
-                        }
+    private suspend fun buildMessages(inputs: RoomInputs): List<DecryptedMessageItem> {
+        val room = inputs.room
+        val hiddenBefore = hiddenRooms.value[room.id] ?: 0L
+        val annotationsByEnvelope = inputs.annotations.groupBy { it.envelopeId }
+        val readTimes = inputs.presence
+            .filter { it.uid != currentUserId }
+            .associate { it.uid to (it.lastReadAt?.toDate()?.time ?: 0L) }
+        val toCache = mutableListOf<CachedVaultMessageEntity>()
+
+        val items = inputs.envelopes.mapNotNull { env ->
+            val createdMillis = (env.createdAt ?: env.updatedAt)?.toDate()?.time ?: System.currentTimeMillis()
+            if (createdMillis < hiddenBefore) return@mapNotNull null
+
+            val cacheKey = "${env.id}|${env.ciphertext.hashCode()}|${env.updatedAt?.seconds}"
+            val opened = openedCache[cacheKey] ?: repository.openEnvelope(room, env).also { openedCache[cacheKey] = it }
+            val payload = opened.payload
+            val meta = payload?.optJSONObject("meta") ?: JSONObject()
+            val type = payload?.optString("type")?.ifBlank { "TEXT" } ?: "TEXT"
+            val text = when {
+                payload == null -> "🔒 Bu mesaj çözülemedi"
+                else -> payload.optString("text")
+            }
+            val senderName = inputs.profiles[env.senderId]?.username
+                ?: payload?.optString("sender")?.ifBlank { null }
+                ?: "bilinmeyen"
+
+            val anns = annotationsByEnvelope[env.id].orEmpty()
+            val reactions = mutableMapOf<String, String>()
+            val votesByUid = mutableMapOf<String, Int>()
+            var pinned = false
+            for (ann in anns) {
+                when (ann.kind) {
+                    AnnotationKind.PIN -> pinned = true
+                    AnnotationKind.REACTION -> repository.decryptAnnotation(room.id, ann)?.let { emoji ->
+                        val handle = inputs.profiles[ann.uid]?.username ?: ann.uid.take(6)
+                        reactions[handle] = emoji
+                    }
+                    AnnotationKind.VOTE -> repository.decryptAnnotation(room.id, ann)?.toIntOrNull()?.let {
+                        votesByUid[ann.uid] = it
                     }
                 }
-                UiState.Success(calls) as UiState<List<CallSignal>>
             }
-        }
-        .catch { error ->
-            val firestoreError = generateSequence(error) { it.cause }
-                .filterIsInstance<FirebaseFirestoreException>()
-                .firstOrNull()
-            if (firestoreError == null && error is CancellationException) throw error
-            val rootError = firestoreError ?: error
-            Log.w(TAG, "Error observing calls", rootError)
-            emit(UiState.Error(rootError.message ?: "Arama kayıtları alınamadı"))
-        }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+            if (type == "POLL") applyVotesToPollMeta(meta, votesByUid, inputs.profiles)
 
-    val incomingRingingCall: StateFlow<CallSignal?> = combine(
-        callSignalsState,
-        _activeCall,
-        _isPanicModeActive
-    ) { callsState, active, panic ->
-        if (panic || active != null) return@combine null
-        val list = (callsState as? UiState.Success)?.data ?: emptyList()
-        val now = System.currentTimeMillis()
-        val ringing = list.firstOrNull { signal ->
-            val createdMs = (signal.createdAt ?: signal.updatedAt)?.toDate()?.time ?: now
-            signal.status == "RINGING" &&
-                signal.callerId != currentUserId &&
-                !dismissedCallIdsInSession.contains(signal.id) &&
-                (now - createdMs) < 90_000L
-        }
-        if (ringing != null && notifiedCallIds.add(ringing.id)) {
-            _latestNotificationEvent.value = SystemNotificationEvent(
-                id = ringing.id.hashCode(),
-                title = ringTitleFor(ringing),
-                body = "Yanıtlamak için uygulamayı açın",
-                isCall = true,
-                isVideoCall = ringing.callType == "VIDEO"
-            )
-        }
-        ringing
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), null)
+            val readBy = 1 + readTimes.count { (uid, readAt) -> uid != env.senderId && readAt >= createdMillis }
 
-    private fun ringTitleFor(signal: CallSignal): String {
-        val typeText = if (signal.callType == "VIDEO") "Görüntülü Arama" else "Sesli Arama"
-        return "@${signal.callerUsername.removePrefix("@")} • $typeText"
-    }
-
-    init {
-        bootstrapIdentityIfNeeded(initialEmailHint)
-        startSelfDestructTicker()
-        ensureDefaultVaultConfig()
-    }
-
-    private fun bootstrapIdentityIfNeeded(emailHint: String?) {
-        val defaultHandle = emailHint?.substringBefore("@")
-            ?.lowercase(Locale.ROOT)
-            ?.replace("[^a-z0-9_\\-]".toRegex(), "")
-            ?.takeIf { it.length >= 3 }
-            ?: "zero_${currentUserId.take(6).lowercase(Locale.ROOT)}"
-
-        val hw = CryptoEngine.getOrCreateHardwareIdentity(currentUserId, defaultHandle)
-        _hardwareKeyStatus.value = hw
-        if (_myProfile.value == null) {
-            _myProfile.value = UserProfile(
-                id = currentUserId,
-                userId = currentUserId,
-                username = defaultHandle,
-                displayName = defaultHandle.uppercase(Locale.ROOT),
-                bio = "ECDH P-256 + AES-256-GCM Doğrulanmış Düğüm",
-                publicKey = hw.publicKeyBase64,
-                safetyFingerprint = hw.safetyFingerprint,
-                onlineStatus = "ONLINE"
-            )
-        }
-
-        viewModelScope.launch {
-            val result = repository.registerOrUpdateProfile(
-                rawUsername = _myProfile.value?.username ?: defaultHandle,
-                displayName = _myProfile.value?.displayName ?: defaultHandle.uppercase(Locale.ROOT),
-                bio = _myProfile.value?.bio ?: "ECDH P-256 + AES-256-GCM Düğümü"
-            )
-            result.onSuccess { profile ->
-                _myProfile.value = profile
-            }
-        }
-    }
-
-    private fun ensureDefaultVaultConfig() {
-        viewModelScope.launch {
-            val existing = vaultDao.getSecurityConfig(currentUserId)
-            if (existing == null) {
-                vaultDao.saveSecurityConfig(
-                    VaultSecurityConfigEntity(
+            if (payload != null && cachedToVault.add(cacheKey)) {
+                toCache.add(
+                    CachedVaultMessageEntity(
+                        messageId = env.id,
                         ownerUid = currentUserId,
-                        normalPinHash = CryptoEngine.hashPin("1337"),
-                        panicPinHash = CryptoEngine.hashPin("9999"),
-                        autoBurnDefaultSeconds = 0L,
-                        screenShieldEnabled = false
+                        roomId = room.id,
+                        roomTitle = room.title,
+                        senderUsername = senderName,
+                        decryptedText = text,
+                        messageType = type,
+                        isStarred = inputs.starred.contains(env.id),
+                        createdAtMillis = createdMillis,
+                        expireAtMillis = if (env.ttlSeconds > 0L) createdMillis + env.ttlSeconds * 1000L else 0L
                     )
                 )
             }
+
+            DecryptedMessageItem(
+                id = env.id,
+                roomId = room.id,
+                senderId = env.senderId,
+                senderUsername = senderName,
+                decryptedText = text,
+                ciphertext = env.ciphertext,
+                iv = env.iv,
+                signatureHash = env.sig.ifBlank { env.signatureHash },
+                messageType = type,
+                encryptedMeta = meta.toString(),
+                reactions = reactions,
+                ttlSeconds = env.ttlSeconds,
+                createdAtMillis = createdMillis,
+                replyToSender = meta.optString("replyToSender").ifBlank { null },
+                replyToPreview = meta.optString("replyToPreview").ifBlank { null },
+                isPinned = pinned,
+                isEdited = env.edited,
+                forwardedFrom = meta.optString("forwardedFrom").ifBlank { null },
+                readByCount = readBy,
+                audioBase64 = meta.optString("audioBase64"),
+                fileName = meta.optString("fileName"),
+                fileSizeKb = meta.optInt("fileSizeKb", 0),
+                fileBase64 = meta.optString("fileBase64"),
+                fileMime = meta.optString("fileMime", "application/octet-stream"),
+                isViewOnce = meta.optBoolean("isViewOnce", false),
+                isSpoiler = meta.optBoolean("isSpoiler", false),
+                isStarred = inputs.starred.contains(env.id),
+                isLegacy = opened.isLegacy,
+                isSignatureVerified = opened.isVerified,
+                isSignerKeyChanged = opened.signerKeyChanged
+            )
+        }
+
+        if (toCache.isNotEmpty()) vaultDao.cacheDecryptedMessages(toCache)
+        maybeMarkRead(room, items)
+        return items
+    }
+
+    private fun applyVotesToPollMeta(meta: JSONObject, votesByUid: Map<String, Int>, profiles: Map<String, UserProfile>) {
+        val options = meta.optJSONArray("options") ?: return
+        for (i in 0 until options.length()) {
+            val opt = options.optJSONObject(i) ?: continue
+            val index = opt.optInt("index", i)
+            val voters = JSONArray()
+            votesByUid.filterValues { it == index }.keys.forEach { uid ->
+                voters.put(profiles[uid]?.username ?: uid.take(6))
+            }
+            opt.put("voters", voters)
         }
     }
 
-    private fun startSelfDestructTicker() {
+    private var lastMarkReadAt = 0L
+
+    private fun maybeMarkRead(room: ChatRoom, items: List<DecryptedMessageItem>) {
+        if (_selectedRoom.value?.id != room.id) return
+        val newestFromOthers = items.lastOrNull { it.senderId != currentUserId }?.createdAtMillis ?: return
+        val now = System.currentTimeMillis()
+        if (newestFromOthers <= lastMarkReadAt || now - lastMarkReadAt < 2000L) return
+        lastMarkReadAt = now
+        viewModelScope.launch { repository.markRoomRead(room.id) }
+    }
+
+    // ------------------------------------------------------------------ statuses
+
+    private val statusCache = ConcurrentHashMap<String, String>()
+    private val statusViewerCache = ConcurrentHashMap<String, List<String>>()
+
+    val statusesState: StateFlow<UiState<List<DecryptedStatusItem>>> = combine(
+        repository.observeStatuses()
+            .map { UiState.Success(it) as UiState<List<EncryptedStatus>> }
+            .catch { e -> emitError(e, "Durumlar yüklenemedi") },
+        profilesByUid,
+        _isPanicModeActive
+    ) { state, profiles, panic -> Triple(state, profiles, panic) }
+        .mapLatest { (state, profiles, panic) ->
+            when (state) {
+                is UiState.Loading -> return@mapLatest UiState.Loading
+                is UiState.Error -> return@mapLatest state
+                is UiState.Success -> Unit
+            }
+            if (panic) return@mapLatest UiState.Success(emptyList<DecryptedStatusItem>())
+            val now = System.currentTimeMillis()
+            val items = state.data.mapNotNull { st ->
+                val created = st.createdAt?.toDate()?.time ?: now
+                if ((st.expireAt?.toDate()?.time ?: (created + DAY_MS)) < now) return@mapNotNull null
+                val content = statusCache[st.id] ?: repository.openStatus(st)?.also { statusCache[st.id] = it }
+                    ?: return@mapNotNull null
+                val viewers = if (st.userId == currentUserId) {
+                    statusViewerCache[st.id] ?: repository.statusViewers(st.id).getOrDefault(emptyList())
+                        .also { statusViewerCache[st.id] = it }
+                } else {
+                    emptyList()
+                }
+                DecryptedStatusItem(
+                    id = st.id,
+                    userId = st.userId,
+                    authorUsername = profiles[st.userId]?.username ?: "bilinmeyen",
+                    decryptedContent = content,
+                    ciphertext = st.ciphertext,
+                    iv = st.iv,
+                    themeColorHex = st.themeColorHex,
+                    viewCount = viewers.count { it != currentUserId }.toLong(),
+                    createdAtMillis = created,
+                    viewerNames = viewers.filter { it != currentUserId }.map { profiles[it]?.username ?: it.take(6) }
+                )
+            }
+            UiState.Success(items) as UiState<List<DecryptedStatusItem>>
+        }
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+
+    // ------------------------------------------------------------------ calls
+
+    private val callsRaw: StateFlow<UiState<List<CallSignal>>> = repository.observeCalls()
+        .map { UiState.Success(it) as UiState<List<CallSignal>> }
+        .catch { e -> emitError(e, "Arama kayıtları alınamadı") }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, UiState.Loading)
+
+    val callSignalsState: StateFlow<UiState<List<CallSignal>>> = combine(callsRaw, profilesByUid, _isPanicModeActive) { state, profiles, panic ->
+        when {
+            state !is UiState.Success -> state
+            panic -> UiState.Success(emptyList())
+            else -> UiState.Success(state.data.map { decorateCall(it, profiles) })
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), UiState.Loading)
+
+    private fun decorateCall(call: CallSignal, profiles: Map<String, UserProfile>): CallSignal {
+        val caller = profiles[call.callerId]
+        val callee = profiles[call.calleeUid]
+        val emojis = if (caller != null && callee != null && caller.hasE2eeKeys && callee.hasE2eeKeys) {
+            CryptoEngine.safetyEmojis(
+                caller.userId, caller.publicKey, caller.signingKey,
+                callee.userId, callee.publicKey, callee.signingKey
+            )
+        } else {
+            ""
+        }
+        return call.copy(
+            callerUsername = caller?.username ?: "bilinmeyen",
+            calleeUsername = callee?.username ?: "bilinmeyen",
+            safetyEmojis = emojis
+        )
+    }
+
+    private val activeCallId = MutableStateFlow<String?>(null)
+    private val dismissedCallIds = ConcurrentHashMap.newKeySet<String>()
+    private val notifiedCallIds = ConcurrentHashMap.newKeySet<String>()
+    private var outgoingSeq = 0L
+
+    private val activeCallDoc: StateFlow<CallSignal?> = combine(callSignalsState, activeCallId) { state, id ->
+        if (id == null) null else (state as? UiState.Success)?.data?.firstOrNull { it.id == id }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    private data class RemoteMedia(val seq: Long, val audio: String, val video: String)
+
+    private val remoteMedia: StateFlow<RemoteMedia?> = activeCallDoc
+        .map { call -> call?.takeIf { it.status == CallStatus.CONNECTED } }
+        .distinctUntilChanged { a, b -> a?.id == b?.id }
+        .flatMapLatest { call ->
+            if (call == null) return@flatMapLatest flowOf(null)
+            val peer = if (call.callerId == currentUserId) call.calleeUid else call.callerId
+            repository.observeCallMedia(call.id, peer)
+                .filterNotNull()
+                .mapLatest { chunk ->
+                    repository.openCallMedia(call, peer, chunk)?.let { (a, v) -> RemoteMedia(chunk.seq, a, v) }
+                }
+                .catch { emit(null) }
+        }
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    val activeCall: StateFlow<CallSignal?> = combine(activeCallDoc, remoteMedia) { call, media ->
+        call?.copy(
+            remoteAudioB64 = media?.audio.orEmpty(),
+            remoteVideoB64 = media?.video.orEmpty(),
+            remoteSeq = media?.seq ?: 0L
+        )
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    val incomingRingingCall: StateFlow<CallSignal?> = combine(callSignalsState, activeCallId, _isPanicModeActive) { state, active, panic ->
+        if (panic || active != null) return@combine null
+        val now = System.currentTimeMillis()
+        (state as? UiState.Success)?.data?.firstOrNull { call ->
+            call.status == CallStatus.RINGING &&
+                call.calleeUid == currentUserId &&
+                !dismissedCallIds.contains(call.id) &&
+                now - (call.createdAt?.toDate()?.time ?: now) < RING_TIMEOUT_MS
+        }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    // ------------------------------------------------------------------ init
+
+    init {
+        bootstrapIdentity()
+        observeMyProfile()
+        observeSearch()
+        observeRoomsForSelectionAndNotifications()
+        observeCallsLifecycle()
+        startScheduledDispatcher()
+        viewModelScope.launch { vaultDao.deleteExpiredCachedMessages(System.currentTimeMillis()) }
+    }
+
+    private fun bootstrapIdentity() {
         viewModelScope.launch {
-            while (isActive) {
-                delay(1000L)
+            val identity = withContext(Dispatchers.Default) { runCatching { repository.identity() } }
+            identity.onSuccess { _hardwareKeyStatus.value = it.status() }
+                .onFailure { banner("Kimlik anahtarları yüklenemedi: ${it.userMessage()}") }
+            repository.ensureProfile(preferredHandle, displayNameHint)
+                .onSuccess { _myProfile.value = it }
+                .onFailure { banner("Profil oluşturulamadı: ${it.userMessage()}") }
+            repository.setPresence(true)
+        }
+    }
+
+    private fun observeMyProfile() {
+        viewModelScope.launch {
+            repository.observeMyProfile()
+                .catch { e -> Log.w(TAG, "profile listener failed", e) }
+                .collect { profile -> if (profile != null) _myProfile.value = profile }
+        }
+    }
+
+    private fun observeSearch() {
+        viewModelScope.launch {
+            _searchQuery
+                .map { it.trim().removePrefix("@").lowercase(Locale.ROOT) }
+                .distinctUntilChanged()
+                .debounce(300)
+                .collect { q ->
+                    if (q.length < 2) {
+                        _searchResults.value = emptyList()
+                    } else {
+                        repository.searchUsers(q)
+                            .onSuccess { _searchResults.value = it }
+                            .onFailure { Log.w(TAG, "search failed", it) }
+                    }
+                }
+        }
+    }
+
+    /** Keeps the open room in sync with the live list and raises message notifications. */
+    private fun observeRoomsForSelectionAndNotifications() {
+        val lastSeenActivity = mutableMapOf<String, Long>()
+        var initialized = false
+        viewModelScope.launch {
+            roomsState.collect { state ->
+                val rooms = (state as? UiState.Success)?.data ?: return@collect
+                _selectedRoom.value?.let { current ->
+                    rooms.firstOrNull { it.id == current.id }?.let { _selectedRoom.value = it }
+                }
                 val now = System.currentTimeMillis()
-                _clockTickMillis.value = now
-                dispatchDueScheduledEnvelopes(now)
+                for (room in rooms) {
+                    val activity = room.activityMillis
+                    val previous = lastSeenActivity[room.id]
+                    lastSeenActivity[room.id] = activity
+                    if (!initialized || previous == null || activity <= previous) continue
+                    if (room.lastSenderUid.isBlank() || room.lastSenderUid == currentUserId) continue
+                    if (_selectedRoom.value?.id == room.id || now - activity > 120_000L) continue
+                    val locked = lockedRoomIds.value.contains(room.id)
+                    notificationChannel.trySend(
+                        SystemNotificationEvent(
+                            id = room.id.hashCode(),
+                            title = if (locked) "ZeroChat" else if (room.isPendingRequest) {
+                                "Yeni sohbet isteği: @${room.lastSenderName}"
+                            } else {
+                                room.displayTitleFor(myHandle)
+                            },
+                            body = if (locked) "Yeni mesaj" else room.previewText
+                        )
+                    )
+                }
+                initialized = true
             }
         }
     }
 
-    private suspend fun dispatchDueScheduledEnvelopes(nowMillis: Long) {
-        val dueList = try {
-            vaultDao.getDueScheduledEnvelopes(currentUserId, nowMillis)
-        } catch (_: Exception) {
-            emptyList()
-        }
-        if (dueList.isEmpty()) return
-        val rooms = (roomsState.value as? UiState.Success)?.data ?: emptyList()
-        val senderName = _myProfile.value?.username ?: "zero_${currentUserId.take(5)}"
-        for (item in dueList) {
-            vaultDao.deleteScheduledEnvelope(item.id)
-            val targetRoom = rooms.firstOrNull { it.id == item.roomId } ?: _selectedRoom.value?.takeIf { it.id == item.roomId }
-            if (targetRoom != null) {
-                val metaJson = JSONObject().apply {
-                    put("scheduledDispatched", true)
-                    put("ratchetStep", (_rawRoomEnvelopes.value.size + 1))
-                }.toString()
-                repository.sendEncryptedMessage(
-                    room = targetRoom,
-                    senderUsername = senderName,
-                    plaintext = item.plaintext,
-                    messageType = "TEXT",
-                    encryptedMeta = metaJson,
-                    ttlSeconds = item.ttlSeconds,
-                    ratchetStep = _rawRoomEnvelopes.value.size + 1
-                ).onSuccess {
-                    _statusBannerMessage.value = "⏳ Zamanlanmış şifreli zarf ağa iletildi: ${item.roomTitle}"
+    private fun observeCallsLifecycle() {
+        viewModelScope.launch {
+            activeCallDoc.collect { call ->
+                if (activeCallId.value != null && call != null && call.status == CallStatus.ENDED) {
+                    activeCallId.value = null
+                    banner("Arama sonlandı")
                 }
             }
         }
+        viewModelScope.launch {
+            incomingRingingCall.collect { call ->
+                if (call != null && notifiedCallIds.add(call.id)) {
+                    notificationChannel.trySend(
+                        SystemNotificationEvent(
+                            id = call.id.hashCode(),
+                            title = "@${call.callerUsername}",
+                            body = if (call.callType == "VIDEO") "Görüntülü arama" else "Sesli arama",
+                            isCall = true,
+                            isVideoCall = call.callType == "VIDEO",
+                            callerUsername = call.callerUsername
+                        )
+                    )
+                }
+            }
+        }
+        // End my own outgoing calls nobody answered.
+        viewModelScope.launch {
+            while (true) {
+                delay(5000L)
+                val now = System.currentTimeMillis()
+                (callsRaw.value as? UiState.Success)?.data
+                    ?.filter { it.callerId == currentUserId && it.status == CallStatus.RINGING }
+                    ?.filter { now - (it.createdAt?.toDate()?.time ?: now) > RING_TIMEOUT_MS }
+                    ?.forEach { repository.setCallStatus(it.id, CallStatus.ENDED) }
+            }
+        }
     }
 
-    private suspend fun markMessageAsReadInternal(
-        env: EncryptedEnvelope,
-        metaObj: JSONObject,
-        readUids: Set<String>
-    ) {
-        val arr = JSONArray()
-        readUids.forEach { arr.put(it) }
-        metaObj.put("readByUids", arr)
-        repository.updateEnvelopeMeta(env.id, metaObj.toString())
+    private suspend fun <T> kotlinx.coroutines.flow.FlowCollector<UiState<T>>.emitError(error: Throwable, fallback: String) {
+        if (error is CancellationException) throw error
+        Log.w(TAG, fallback, error)
+        emit(UiState.Error("$fallback: ${error.userMessage()}"))
     }
+
+    // ------------------------------------------------------------------ search, typing, profile
 
     fun updateSearchQuery(query: String) {
         _searchQuery.value = query
-        val cleaned = query.trim().removePrefix("@").lowercase(Locale.ROOT)
-        if (cleaned.length >= 2) {
-            viewModelScope.launch {
-                repository.searchUsersInCloudByHandle(cleaned)
-            }
-        }
     }
 
     fun updateInChatSearchQuery(query: String) {
@@ -658,257 +789,177 @@ class ZeroChatViewModel(
     }
 
     fun setEditingMessage(message: DecryptedMessageItem?) {
+        if (message != null && message.senderId != currentUserId) return
         _editingMessage.value = message
         if (message != null) _replyingToMessage.value = null
     }
 
+    private var lastTypingSentAt = 0L
+
     fun notifyUserTypingInActiveRoom() {
         val room = _selectedRoom.value ?: return
-        typingResetJob?.cancel()
-        typingResetJob = viewModelScope.launch {
-            repository.updatePresenceOrTypingStatus("TYPING:${room.id}")
-            delay(3000L)
-            repository.updatePresenceOrTypingStatus("ONLINE")
-        }
-    }
-
-    fun clearBannerMessage() {
-        _statusBannerMessage.value = null
-    }
-
-    fun postBannerMessage(message: String) {
-        _statusBannerMessage.value = message
+        val now = System.currentTimeMillis()
+        if (now - lastTypingSentAt < TYPING_THROTTLE_MS) return
+        lastTypingSentAt = now
+        viewModelScope.launch { repository.markTyping(room.id) }
     }
 
     fun updateMyProfile(username: String, displayName: String, bio: String) {
         viewModelScope.launch {
-            val res = repository.registerOrUpdateProfile(username, displayName, bio)
-            res.onSuccess { updated ->
-                _myProfile.value = updated
-                _hardwareKeyStatus.value = CryptoEngine.getOrCreateHardwareIdentity(currentUserId, updated.username)
-                _statusBannerMessage.value = "ECDH P-256 kimliği ve @${updated.username} dizini güncellendi"
-            }.onFailure { err ->
-                _statusBannerMessage.value = "Profil güncellenemedi: ${err.localizedMessage}"
-            }
+            repository.updateProfile(username, displayName, bio)
+                .onSuccess {
+                    _myProfile.value = it
+                    banner("Profil güncellendi: @${it.username}")
+                }
+                .onFailure { banner("Profil güncellenemedi: ${it.userMessage()}") }
         }
     }
 
+    // ------------------------------------------------------------------ rooms
+
     fun openRoom(room: ChatRoom) {
+        if (_isPanicModeActive.value) return
         _selectedRoom.value = room
         _inChatSearchQuery.value = ""
         _replyingToMessage.value = null
         _editingMessage.value = null
-        roomEnvelopesJob?.cancel()
-        roomEnvelopesJob = viewModelScope.launch {
-            repository.observeRoomEnvelopes(room.id, currentUserId)
-                .catch { e ->
-                    Log.w(TAG, "Error observing envelopes for ${room.id}", e)
-                }
-                .collect { list ->
-                    _rawRoomEnvelopes.value = list
-                }
-        }
+        lastMarkReadAt = 0L
+        viewModelScope.launch { repository.markRoomRead(room.id) }
     }
 
     fun closeRoom() {
-        roomEnvelopesJob?.cancel()
         _selectedRoom.value = null
         _inChatSearchQuery.value = ""
         _replyingToMessage.value = null
         _editingMessage.value = null
-        _rawRoomEnvelopes.value = emptyList()
     }
 
     fun startDirectChatWithPeer(peer: UserProfile, introNote: String = "") {
-        val me = _myProfile.value ?: UserProfile(
-            id = currentUserId,
-            userId = currentUserId,
-            username = "zero_${currentUserId.take(5)}",
-            displayName = "Zero Node"
-        )
-        val existingRooms = (roomsState.value as? UiState.Success)?.data ?: emptyList()
-        val existing = existingRooms.firstOrNull { room ->
-            !room.isGroup &&
-                !room.isRejectedRequest &&
-                (room.participantUids.contains(peer.userId) ||
-                    room.title.removePrefix("@").equals(peer.username, ignoreCase = true))
+        if (_isPanicModeActive.value) return
+        val me = _myProfile.value ?: run {
+            banner("Profiliniz henüz yüklenmedi")
+            return
         }
-        if (existing != null && existing.isApprovedConnection && introNote.isBlank()) {
+        val existing = (roomsState.value as? UiState.Success)?.data?.firstOrNull {
+            !it.isGroup && it.participantUids.contains(peer.userId) && !it.isRejectedRequest
+        }
+        if (existing != null && introNote.isBlank()) {
             openRoom(existing)
             return
         }
-
         viewModelScope.launch {
-            repository.createOrGetDirectRoom(
-                myProfile = me,
-                peerProfile = peer
-            )
+            vaultDao.unhideRoom(currentUserId, ZeroChatRepository.directRoomId(currentUserId, peer.userId))
+            repository.requestDirectChat(me, peer, introNote)
                 .onSuccess { room ->
                     openRoom(room)
-                    val cleanNote = introNote.trim()
-                    if (cleanNote.isNotBlank()) {
-                        val metaJson = JSONObject().apply {
-                            put("ratchetStep", 1)
-                            put("handshakeIntro", true)
-                            put("readByUids", JSONArray().put(currentUserId))
-                        }.toString()
-                        repository.sendEncryptedMessage(
-                            room = room,
-                            senderUsername = me.username,
-                            plaintext = cleanNote,
-                            messageType = "TEXT",
-                            encryptedMeta = metaJson,
-                            ttlSeconds = room.defaultTtlSeconds,
-                            ratchetStep = 1
-                        )
-                    }
-                    _statusBannerMessage.value = "🔐 @${peer.username} ile uçtan uca şifreli P2P tüneli kuruldu"
+                    banner(
+                        if (room.isPendingRequest) "@${peer.username} kişisine sohbet isteği gönderildi"
+                        else "@${peer.username} ile sohbet açıldı"
+                    )
                 }
-                .onFailure { err ->
-                    _statusBannerMessage.value = "Şifreli sohbet başlatılamadı: ${err.localizedMessage}"
-                }
+                .onFailure { banner("Sohbet başlatılamadı: ${it.userMessage()}") }
         }
     }
 
     fun approveConnectionRequest(room: ChatRoom) {
-        val myHandle = _myProfile.value?.username ?: "zero_${currentUserId.take(5)}"
         viewModelScope.launch {
-            repository.approveConnectionRequest(room, myHandle)
-                .onSuccess { updatedRoom ->
-                    if (_selectedRoom.value?.id == updatedRoom.id) {
-                        _selectedRoom.value = updatedRoom
-                    }
-                    _statusBannerMessage.value = "✅ ${updatedRoom.title} iletişim ve takip isteği onaylandı! Şifreli tünel aktif."
-                }
-                .onFailure { err ->
-                    _statusBannerMessage.value = "İstek onaylanamadı: ${err.localizedMessage}"
-                }
+            repository.approveConnectionRequest(room)
+                .onSuccess { banner("Sohbet isteği kabul edildi") }
+                .onFailure { banner("İstek kabul edilemedi: ${it.userMessage()}") }
         }
     }
 
     fun rejectOrCancelConnectionRequest(room: ChatRoom) {
-        val myHandle = _myProfile.value?.username ?: "zero_${currentUserId.take(5)}"
         viewModelScope.launch {
-            repository.rejectOrCancelConnectionRequest(room, myHandle)
-                .onSuccess { updatedRoom ->
-                    if (_selectedRoom.value?.id == updatedRoom.id) {
-                        closeRoom()
-                    }
-                    _statusBannerMessage.value = "⛔ ${updatedRoom.title} iletişim isteği reddedildi / geri çekildi"
+            repository.rejectOrCancelConnectionRequest(room)
+                .onSuccess {
+                    if (_selectedRoom.value?.id == room.id) closeRoom()
+                    banner(if (room.requesterUid == currentUserId) "Sohbet isteği geri çekildi" else "Sohbet isteği reddedildi")
                 }
-                .onFailure { err ->
-                    _statusBannerMessage.value = "İstek iptal edilemedi: ${err.localizedMessage}"
-                }
+                .onFailure { banner("İşlem başarısız: ${it.userMessage()}") }
         }
     }
 
+    /**
+     * "Delete chat": groups are left (owner deletes the group for everyone); direct messages
+     * are hidden from this device only and the other person's history is untouched.
+     */
     fun deleteChatRoomFromRecent(room: ChatRoom) {
         viewModelScope.launch {
-            if (_selectedRoom.value?.id == room.id) {
-                closeRoom()
-            }
+            if (_selectedRoom.value?.id == room.id) closeRoom()
             vaultDao.deleteCachedMessagesForRoom(currentUserId, room.id)
             vaultDao.unpinRoom(currentUserId, room.id)
-            vaultDao.unlockRoom(room.id)
-            repository.deleteChatRoomCompletely(room.id, currentUserId)
-                .onSuccess {
-                    _statusBannerMessage.value = "🗑️ ${room.title} sohbeti ve şifreli zarfları listeden kalıcı olarak silindi"
+            vaultDao.unlockRoom(currentUserId, room.id)
+            val result = when {
+                room.isGroup && room.ownerId == currentUserId -> repository.deleteRoomForEveryone(room)
+                room.isGroup -> repository.leaveGroup(room)
+                room.isPendingRequest && room.requesterUid == currentUserId -> repository.rejectOrCancelConnectionRequest(room)
+                else -> {
+                    vaultDao.hideRoom(HiddenRoomEntity(ownerUid = currentUserId, roomId = room.id))
+                    Result.success(Unit)
                 }
-                .onFailure { err ->
-                    _statusBannerMessage.value = "Sohbet silinemedi: ${err.localizedMessage}"
-                }
+            }
+            result
+                .onSuccess { banner("${room.title} listeden kaldırıldı") }
+                .onFailure { banner("Sohbet silinemedi: ${it.userMessage()}") }
         }
     }
 
+    /**
+     * Handles a scanned QR code or typed handle. A QR code carries the peer's identity
+     * fingerprint; the peer is marked verified only if it matches the keys on the server.
+     */
     fun handleScannedPeerHandleOrKey(scannedInput: String) {
         val raw = scannedInput.trim()
         if (raw.isBlank()) return
-
-        // Parse structured QR payload: zerochat://peer?u=handle&uid=id&fp=fingerprint&pk=pubkey
-        // or ZEROCHAT://VERIFY/@handle::fp::pk or plain @username
-        var parsedHandle = ""
-        var parsedUid = ""
-        var parsedFp = ""
-        var parsedPk = ""
-
-        if (raw.startsWith("zerochat://", ignoreCase = true) && raw.contains("?")) {
-            val queryPart = raw.substringAfter("?")
-            queryPart.split("&").forEach { kv ->
-                val parts = kv.split("=", limit = 2)
-                if (parts.size == 2) {
-                    val k = parts[0].lowercase(Locale.ROOT)
-                    val v = java.net.URLDecoder.decode(parts[1], "UTF-8")
-                    when (k) {
-                        "u", "user", "username" -> parsedHandle = v
-                        "uid", "id" -> parsedUid = v
-                        "fp", "fingerprint" -> parsedFp = v
-                        "pk", "key", "pubkey" -> parsedPk = v
+        var handle = ""
+        var uid = ""
+        var fingerprint = ""
+        try {
+            if (raw.startsWith("zerochat://", ignoreCase = true) && raw.contains("?")) {
+                raw.substringAfter("?").split("&").forEach { kv ->
+                    val parts = kv.split("=", limit = 2)
+                    if (parts.size == 2) {
+                        val value = java.net.URLDecoder.decode(parts[1], "UTF-8")
+                        when (parts[0].lowercase(Locale.ROOT)) {
+                            "u", "user", "username" -> handle = value
+                            "uid", "id" -> uid = value
+                            "fp", "fingerprint" -> fingerprint = value
+                        }
                     }
                 }
+            } else {
+                handle = raw
             }
-        } else if (raw.contains("::")) {
-            val segs = raw.removePrefix("ZEROCHAT://VERIFY/").split("::")
-            parsedHandle = segs.getOrNull(0).orEmpty()
-            parsedFp = segs.getOrNull(1).orEmpty()
-            parsedPk = segs.getOrNull(2).orEmpty()
-        } else {
-            parsedHandle = raw
+        } catch (e: IllegalArgumentException) {
+            banner("QR kodu okunamadı")
+            return
         }
-
-        val cleanedHandle = parsedHandle.trim()
-            .removePrefix("@")
-            .lowercase(Locale.ROOT)
-            .replace("[^a-z0-9_\\-]".toRegex(), "")
-            .take(28)
-
-        if (cleanedHandle.isBlank()) return
-
-        val peers = (directoryUsersState.value as? UiState.Success)?.data ?: emptyList()
-        val matched = peers.firstOrNull {
-            it.username.lowercase(Locale.ROOT) == cleanedHandle ||
-                (parsedUid.isNotBlank() && it.userId == parsedUid) ||
-                (parsedFp.isNotBlank() && it.safetyFingerprint == parsedFp)
-        }
-
-        val targetPeer = matched ?: run {
-            val peerUid = parsedUid.ifBlank {
-                "peer_" + CryptoEngine.sha256Hex("ZEROCHAT_PEER::$cleanedHandle").take(18)
-            }
-            val (genPubKey, genFp) = CryptoEngine.generateIdentityMaterial(peerUid, cleanedHandle)
-            UserProfile(
-                id = peerUid,
-                userId = peerUid,
-                username = cleanedHandle,
-                displayName = "@$cleanedHandle Siber Düğümü",
-                bio = "QR / Kullanıcı Adı ile Eşleşen Şifreli Düğüm",
-                publicKey = parsedPk.ifBlank { genPubKey },
-                safetyFingerprint = parsedFp.ifBlank { genFp },
-                onlineStatus = "ONLINE"
-            ).also { discovered ->
-                repository.registerDiscoveredPeer(discovered)
-            }
-        }
-
         viewModelScope.launch {
-            val cloudMatches = repository.searchUsersInCloudByHandle(cleanedHandle)
-            val cloudPeer = cloudMatches.firstOrNull {
-                it.username.equals(cleanedHandle, ignoreCase = true) ||
-                    (parsedUid.isNotBlank() && it.userId == parsedUid)
+            val peer = (if (uid.isNotBlank()) repository.getProfile(uid, forceRefresh = true) else null)
+                ?: repository.findUserByHandle(handle).getOrNull()
+            if (peer == null || peer.userId == currentUserId) {
+                banner("Kullanıcı bulunamadı")
+                return@launch
             }
-            val finalPeer = cloudPeer ?: targetPeer
-            vaultDao.saveVerifiedPeer(
-                VerifiedPeerEntity(
-                    ownerUid = currentUserId,
-                    peerUsername = finalPeer.username.lowercase(Locale.ROOT),
-                    verifiedPublicKey = finalPeer.publicKey,
-                    verifiedSafetyFingerprint = finalPeer.safetyFingerprint
-                )
-            )
-            _statusBannerMessage.value = "🛡️ QR / Düğüm Doğrulandı: @${finalPeer.username} ile şifreli sohbet açılıyor"
-            startDirectChatWithPeer(
-                peer = finalPeer,
-                introNote = "🛡️ QR / Açık anahtar doğrulaması ile uçtan uca şifreli bağlantı kuruldu."
-            )
+            if (fingerprint.isNotBlank()) {
+                val actual = CryptoEngine.fingerprint(peer.publicKey, peer.signingKey).filter { it.isDigit() }
+                if (actual == fingerprint.filter { it.isDigit() } && peer.hasE2eeKeys) {
+                    vaultDao.saveVerifiedPeer(
+                        VerifiedPeerEntity(
+                            ownerUid = currentUserId,
+                            peerUid = peer.userId,
+                            peerUsername = peer.username,
+                            verifiedKeyId = CryptoEngine.identityKeyId(peer.publicKey, peer.signingKey)
+                        )
+                    )
+                    banner("🛡️ @${peer.username} doğrulandı: QR kodu sunucudaki anahtarlarla eşleşiyor")
+                } else {
+                    banner("⚠️ @${peer.username} DOĞRULANAMADI: QR kodu sunucudaki anahtarlarla eşleşmiyor")
+                    return@launch
+                }
+            }
+            startDirectChatWithPeer(peer)
         }
     }
 
@@ -916,65 +967,106 @@ class ZeroChatViewModel(
         val me = _myProfile.value ?: return
         viewModelScope.launch {
             repository.createGroupRoom(me, title, peers, ttlSeconds)
-                .onSuccess { room ->
-                    _statusBannerMessage.value = "'${room.title}' şifreli grup odası kuruldu"
-                    openRoom(room)
+                .onSuccess {
+                    banner("'${it.title}' grubu oluşturuldu")
+                    openRoom(it)
                 }
-                .onFailure { err ->
-                    _statusBannerMessage.value = "Grup oluşturulamadı: ${err.localizedMessage}"
-                }
+                .onFailure { banner("Grup oluşturulamadı: ${it.userMessage()}") }
         }
     }
 
     fun setRoomDefaultTtl(room: ChatRoom, ttlSeconds: Long) {
         viewModelScope.launch {
-            repository.updateRoomTtl(room.id, ttlSeconds).onSuccess {
-                _selectedRoom.value = room.copy(defaultTtlSeconds = ttlSeconds)
-                val label = if (ttlSeconds == 0L) "Kapalı" else "${ttlSeconds} sn"
-                _statusBannerMessage.value = "Oda süreli mesaj imha sayacı: $label"
-            }
+            repository.updateRoomTtl(room, ttlSeconds)
+                .onSuccess { banner("Süreli mesaj: ${if (ttlSeconds == 0L) "Kapalı" else "$ttlSeconds sn"}") }
+                .onFailure { banner("Ayar değiştirilemedi: ${it.userMessage()}") }
         }
     }
 
     fun updateActiveGroupMembersAndTitle(newTitle: String, selectedPeers: List<UserProfile>) {
         val room = _selectedRoom.value ?: return
-        val me = _myProfile.value ?: return
         viewModelScope.launch {
-            repository.updateGroupMembersAndTitle(room, newTitle, selectedPeers, me)
-                .onSuccess { updatedRoom ->
-                    _selectedRoom.value = updatedRoom
-                    _statusBannerMessage.value = "Grup üyeleri ve başlığı güncellendi (${updatedRoom.participantUids.size} düğüm)"
+            repository.updateGroupMembersAndTitle(room, newTitle, selectedPeers)
+                .onSuccess {
+                    _selectedRoom.value = it
+                    banner("Grup güncellendi (${it.participantUids.size} üye)")
                 }
-                .onFailure { err ->
-                    _statusBannerMessage.value = "Grup güncellenemedi: ${err.localizedMessage}"
-                }
+                .onFailure { banner("Grup güncellenemedi: ${it.userMessage()}") }
         }
     }
 
     fun rotateActiveRoomEncryptionKey() {
         val room = _selectedRoom.value ?: return
-        val senderName = _myProfile.value?.username ?: "zero_${currentUserId.take(5)}"
         viewModelScope.launch {
-            repository.rotateRoomEncryptionKey(room, senderName)
-                .onSuccess { updatedRoom ->
-                    _selectedRoom.value = updatedRoom
-                    _statusBannerMessage.value = "🔄 Oda Şifreleme Anahtarı Döndürüldü (Key Rotation): ${updatedRoom.roomKeyHint.take(16)}..."
-                }
-                .onFailure { err ->
-                    _statusBannerMessage.value = "Anahtar döndürülemedi: ${err.localizedMessage}"
-                }
+            repository.rotateRoomKey(room)
+                .onSuccess { banner("🔄 Sohbet anahtarı yenilendi (sürüm $it)") }
+                .onFailure { banner("Anahtar yenilenemedi: ${it.userMessage()}") }
         }
     }
 
-    private fun buildBaseMetaJson(
-        ratchetStep: Int,
-        isViewOnce: Boolean = false,
-        isSpoiler: Boolean = false
-    ): JSONObject {
+    fun togglePinRoom(roomId: String, currentlyPinned: Boolean) {
+        viewModelScope.launch {
+            if (currentlyPinned) {
+                vaultDao.unpinRoom(currentUserId, roomId)
+            } else {
+                vaultDao.pinRoom(PinnedRoomEntity(ownerUid = currentUserId, roomId = roomId))
+            }
+        }
+    }
+
+    fun toggleRoomVaultLock(roomId: String, currentlyLocked: Boolean) {
+        viewModelScope.launch {
+            if (currentlyLocked) {
+                vaultDao.unlockRoom(currentUserId, roomId)
+                banner("Sohbet gizli kasadan çıkarıldı")
+            } else {
+                vaultDao.setRoomLocked(LockedRoomEntity(ownerUid = currentUserId, roomId = roomId))
+                banner("Sohbet PIN korumalı gizli kasaya taşındı")
+            }
+        }
+    }
+
+    /** Safety number of the open direct conversation, or null for groups / unknown keys. */
+    fun safetyInfoFor(room: ChatRoom): SafetyInfo? {
+        if (room.isGroup) return null
+        val me = _myProfile.value ?: return null
+        val peerUid = room.peerUidFor(currentUserId) ?: return null
+        val peer = profilesByUid.value[peerUid] ?: return null
+        if (!me.hasE2eeKeys || !peer.hasE2eeKeys) return null
+        return SafetyInfo(
+            safetyNumber = CryptoEngine.safetyNumber(me.userId, me.publicKey, me.signingKey, peer.userId, peer.publicKey, peer.signingKey),
+            emojis = CryptoEngine.safetyEmojis(me.userId, me.publicKey, me.signingKey, peer.userId, peer.publicKey, peer.signingKey),
+            peerUsername = peer.username
+        )
+    }
+
+    /** Marks the peer of the open conversation as verified after comparing the safety number. */
+    fun verifyActiveRoomIdentity() {
+        val room = _selectedRoom.value ?: return
+        val peerUid = room.peerUidFor(currentUserId) ?: return
+        val peer = profilesByUid.value[peerUid] ?: return
+        if (!peer.hasE2eeKeys) {
+            banner("@${peer.username} henüz şifreleme anahtarı yayınlamadı")
+            return
+        }
+        viewModelScope.launch {
+            vaultDao.saveVerifiedPeer(
+                VerifiedPeerEntity(
+                    ownerUid = currentUserId,
+                    peerUid = peer.userId,
+                    peerUsername = peer.username,
+                    verifiedKeyId = CryptoEngine.identityKeyId(peer.publicKey, peer.signingKey)
+                )
+            )
+            banner("🛡️ @${peer.username} doğrulandı")
+        }
+    }
+
+    // ------------------------------------------------------------------ sending
+
+    private fun baseMeta(isViewOnce: Boolean = false, isSpoiler: Boolean = false): JSONObject {
         val reply = _replyingToMessage.value
         return JSONObject().apply {
-            put("ratchetStep", ratchetStep)
-            put("readByUids", JSONArray().put(currentUserId))
             if (isViewOnce) put("isViewOnce", true)
             if (isSpoiler) put("isSpoiler", true)
             if (reply != null) {
@@ -985,889 +1077,689 @@ class ZeroChatViewModel(
         }
     }
 
-    fun sendTextMessage(
-        text: String,
-        overrideTtlSeconds: Long? = null,
-        isViewOnce: Boolean = false,
-        isSpoiler: Boolean = false
-    ) {
+    private fun payload(type: String, text: String, meta: JSONObject): JSONObject = JSONObject().apply {
+        put("type", type)
+        put("text", text)
+        put("sender", myHandle)
+        put("meta", meta)
+    }
+
+    fun sendTextMessage(text: String, overrideTtlSeconds: Long? = null, isViewOnce: Boolean = false, isSpoiler: Boolean = false) {
         val room = _selectedRoom.value ?: return
-        val senderName = _myProfile.value?.username ?: "zero_${currentUserId.take(5)}"
-        if (!room.isApprovedConnection) {
-            viewModelScope.launch {
-                repository.approveConnectionRequest(room, senderName).onSuccess { updated ->
-                    _selectedRoom.value = updated
-                }
-            }
-        }
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
 
-        // Handle Edit Mode if active
         val editing = _editingMessage.value
         if (editing != null) {
             _editingMessage.value = null
+            if (editing.messageType != "TEXT" || editing.isLegacy) {
+                banner("Yalnızca metin mesajları düzenlenebilir")
+                return
+            }
+            val meta = runCatching { JSONObject(editing.encryptedMeta) }.getOrDefault(JSONObject())
             viewModelScope.launch {
-                repository.editEncryptedMessage(
-                    envelopeId = editing.id,
-                    roomKeyHint = room.roomKeyHint,
-                    newPlaintext = trimmed,
-                    existingMetaJson = editing.encryptedMeta,
-                    ratchetStep = editing.ratchetStep
-                ).onSuccess {
-                    _statusBannerMessage.value = "Mesaj yeniden şifrelenerek düzenlendi"
-                }
+                repository.editMessage(room, editing.id, payload("TEXT", trimmed, meta))
+                    .onSuccess { banner("Mesaj düzenlendi") }
+                    .onFailure { banner("Mesaj düzenlenemedi: ${it.userMessage()}") }
             }
             return
         }
-
-        val nextRatchetStep = (_rawRoomEnvelopes.value.size + 1)
-        val metaJson = buildBaseMetaJson(
-            ratchetStep = nextRatchetStep,
-            isViewOnce = isViewOnce,
-            isSpoiler = isSpoiler
-        ).toString()
+        val meta = baseMeta(isViewOnce, isSpoiler)
         _replyingToMessage.value = null
-        val ttl = overrideTtlSeconds ?: room.defaultTtlSeconds
-
-        dispatchOrQueueMessage(
-            room = room,
-            senderName = senderName,
-            plaintext = trimmed,
-            messageType = "TEXT",
-            encryptedMeta = metaJson,
-            ttlSeconds = ttl,
-            ratchetStep = nextRatchetStep
-        )
+        dispatchOrQueue(room, payload("TEXT", trimmed, meta), overrideTtlSeconds ?: room.defaultTtlSeconds)
     }
 
     fun forwardMessageToRoom(message: DecryptedMessageItem, targetRoom: ChatRoom) {
-        val senderName = _myProfile.value?.username ?: "zero_${currentUserId.take(5)}"
-        val nextRatchetStep = 1
-        val metaJson = JSONObject().apply {
-            put("ratchetStep", nextRatchetStep)
+        val meta = runCatching { JSONObject(message.encryptedMeta) }.getOrDefault(JSONObject()).apply {
+            remove("replyToId"); remove("replyToSender"); remove("replyToPreview")
             put("forwardedFrom", message.senderUsername)
-            put("readByUids", JSONArray().put(currentUserId))
-        }.toString()
-
-        viewModelScope.launch {
-            repository.sendEncryptedMessage(
-                room = targetRoom,
-                senderUsername = senderName,
-                plaintext = message.decryptedText,
-                messageType = "TEXT",
-                encryptedMeta = metaJson,
-                ttlSeconds = targetRoom.defaultTtlSeconds,
-                ratchetStep = nextRatchetStep
-            ).onSuccess {
-                _statusBannerMessage.value = "Mesaj '${targetRoom.title}' odasına yeniden şifrelenerek iletildi"
-            }
+        }
+        dispatchOrQueue(targetRoom, payload(message.messageType, message.decryptedText, meta), targetRoom.defaultTtlSeconds) {
+            banner("Mesaj '${targetRoom.title}' sohbetine iletildi")
         }
     }
 
-    fun togglePinMessage(message: DecryptedMessageItem) {
-        viewModelScope.launch {
-            val metaObj = try {
-                JSONObject(message.encryptedMeta)
-            } catch (_: Exception) {
-                JSONObject()
-            }
-            val newPinState = !message.isPinned
-            metaObj.put("isPinned", newPinState)
-            repository.updateEnvelopeMeta(message.id, metaObj.toString()).onSuccess {
-                _statusBannerMessage.value = if (newPinState) {
-                    "Mesaj sohbetin üstüne sabitlendi 📌"
-                } else {
-                    "Mesaj sabitlemesi kaldırıldı"
-                }
-            }
-        }
-    }
-
-    fun toggleStarMessage(message: DecryptedMessageItem) {
-        viewModelScope.launch {
-            val metaObj = try {
-                JSONObject(message.encryptedMeta)
-            } catch (_: Exception) {
-                JSONObject()
-            }
-            val newStarState = !message.isStarred
-            metaObj.put("isStarred", newStarState)
-            vaultDao.updateMessageStarred(message.id, newStarState)
-            repository.updateEnvelopeMeta(message.id, metaObj.toString()).onSuccess {
-                _statusBannerMessage.value = if (newStarState) {
-                    "Mesaj Yıldızlı Şifreli Kasaya eklendi ⭐"
-                } else {
-                    "Mesaj yıldızı kaldırıldı"
-                }
-            }
-        }
-    }
-
-    fun sendVoiceNoteMessage(
-        durationSeconds: Int,
-        amplitudePattern: String,
-        audioBase64: String = "",
-        ttlSeconds: Long? = null,
-        isViewOnce: Boolean = false
-    ) {
+    fun sendVoiceNoteMessage(durationSeconds: Int, amplitudePattern: String, audioBase64: String = "", ttlSeconds: Long? = null, isViewOnce: Boolean = false) {
         val room = _selectedRoom.value ?: return
-        val senderName = _myProfile.value?.username ?: "zero_${currentUserId.take(5)}"
-        val nextRatchetStep = (_rawRoomEnvelopes.value.size + 1)
-        val meta = buildBaseMetaJson(nextRatchetStep, isViewOnce = isViewOnce).apply {
+        if (audioBase64.isBlank()) {
+            banner("Ses kaydı boş, gönderilmedi")
+            return
+        }
+        if (audioBase64.length > MAX_MEDIA_B64) {
+            banner("Sesli mesaj çok uzun (en fazla ~${MAX_VOICE_SECONDS} sn)")
+            return
+        }
+        val meta = baseMeta(isViewOnce).apply {
             put("durationSeconds", durationSeconds)
             put("waveform", amplitudePattern)
-            if (audioBase64.isNotBlank() && audioBase64.length <= 190000) {
-                put("audioBase64", audioBase64)
-            }
-        }.toString()
+            put("audioBase64", audioBase64)
+        }
         _replyingToMessage.value = null
-
-        dispatchOrQueueMessage(
-            room = room,
-            senderName = senderName,
-            plaintext = "🎙️ Şifreli Sesli Not (${durationSeconds} sn)",
-            messageType = "VOICE",
-            encryptedMeta = meta,
-            ttlSeconds = ttlSeconds ?: room.defaultTtlSeconds,
-            ratchetStep = nextRatchetStep
-        )
+        dispatchOrQueue(room, payload("VOICE", "🎙️ Sesli mesaj ($durationSeconds sn)", meta), ttlSeconds ?: room.defaultTtlSeconds)
     }
 
-    fun sendImageAttachmentMessage(
-        uriString: String,
-        caption: String,
-        ttlSeconds: Long? = null,
-        isViewOnce: Boolean = false,
-        stegoSecretMessage: String = ""
-    ) {
+    /** [uriString] must be a `data:image/...;base64,` URI produced from the picked image. */
+    fun sendImageAttachmentMessage(uriString: String, caption: String, ttlSeconds: Long? = null, isViewOnce: Boolean = false, stegoSecretMessage: String = "") {
         val room = _selectedRoom.value ?: return
-        val senderName = _myProfile.value?.username ?: "zero_${currentUserId.take(5)}"
-        val nextRatchetStep = (_rawRoomEnvelopes.value.size + 1)
-        val stegoPacket = if (stegoSecretMessage.isNotBlank()) {
-            CryptoEngine.embedStegoPayload(stegoSecretMessage.trim(), room.roomKeyHint)
-        } else {
-            ""
+        if (!uriString.startsWith("data:image")) {
+            banner("Görsel işlenemedi, gönderilmedi")
+            return
         }
-        val meta = buildBaseMetaJson(nextRatchetStep, isViewOnce = isViewOnce).apply {
+        if (uriString.length > MAX_MEDIA_B64) {
+            banner("Görsel çok büyük")
+            return
+        }
+        val meta = baseMeta(isViewOnce).apply {
             put("mediaUri", uriString)
             put("mime", "image/jpeg")
-            if (stegoPacket.isNotBlank()) {
-                put("stegoPayload", stegoPacket)
-            }
-        }.toString()
+        }
         _replyingToMessage.value = null
-
-        dispatchOrQueueMessage(
-            room = room,
-            senderName = senderName,
-            plaintext = caption.ifBlank {
-                if (stegoPacket.isNotBlank()) "🖼️ Steganografik Taşıyıcı Görsel" else "📷 Şifreli Görsel Zarfı"
-            },
-            messageType = "IMAGE",
-            encryptedMeta = meta,
-            ttlSeconds = ttlSeconds ?: room.defaultTtlSeconds,
-            ratchetStep = nextRatchetStep
-        )
+        dispatchOrQueue(room, payload("IMAGE", caption.trim(), meta), ttlSeconds ?: room.defaultTtlSeconds)
     }
 
-    fun sendFileAttachmentMessage(
-        fileName: String,
-        fileSizeKb: Int,
-        mimeType: String,
-        fileBase64: String = "",
-        ttlSeconds: Long? = null
-    ) {
+    fun sendFileAttachmentMessage(fileName: String, fileSizeKb: Int, mimeType: String, fileBase64: String = "", ttlSeconds: Long? = null) {
         val room = _selectedRoom.value ?: return
-        val senderName = _myProfile.value?.username ?: "zero_${currentUserId.take(5)}"
-        val nextRatchetStep = (_rawRoomEnvelopes.value.size + 1)
-        val meta = buildBaseMetaJson(nextRatchetStep).apply {
-            put("fileName", fileName)
+        if (fileBase64.isBlank()) {
+            banner("Dosya okunamadı, gönderilmedi")
+            return
+        }
+        if (fileBase64.length > MAX_MEDIA_B64) {
+            banner("Dosya çok büyük (en fazla ${MAX_FILE_KB} KB)")
+            return
+        }
+        val meta = baseMeta().apply {
+            put("fileName", fileName.take(120))
             put("fileSizeKb", fileSizeKb)
             put("fileMime", mimeType)
-            if (fileBase64.isNotBlank() && fileBase64.length <= 190000) {
-                put("fileBase64", fileBase64)
-            }
-        }.toString()
+            put("fileBase64", fileBase64)
+        }
         _replyingToMessage.value = null
-
-        dispatchOrQueueMessage(
-            room = room,
-            senderName = senderName,
-            plaintext = "📄 Şifreli Dosya: $fileName ($fileSizeKb KB)",
-            messageType = "FILE",
-            encryptedMeta = meta,
-            ttlSeconds = ttlSeconds ?: room.defaultTtlSeconds,
-            ratchetStep = nextRatchetStep
-        )
+        dispatchOrQueue(room, payload("FILE", "📄 $fileName ($fileSizeKb KB)", meta), ttlSeconds ?: room.defaultTtlSeconds)
     }
 
     fun sendLocationMessage(latitude: Double, longitude: Double, label: String, ttlSeconds: Long? = null) {
         val room = _selectedRoom.value ?: return
-        val senderName = _myProfile.value?.username ?: "zero_${currentUserId.take(5)}"
-        val nextRatchetStep = (_rawRoomEnvelopes.value.size + 1)
-        val meta = buildBaseMetaJson(nextRatchetStep).apply {
+        val meta = baseMeta().apply {
             put("lat", latitude)
             put("lng", longitude)
             put("label", label)
-        }.toString()
+        }
         _replyingToMessage.value = null
-
-        dispatchOrQueueMessage(
-            room = room,
-            senderName = senderName,
-            plaintext = "📍 $label (${String.format(Locale.US, "%.4f, %.4f", latitude, longitude)})",
-            messageType = "LOCATION",
-            encryptedMeta = meta,
-            ttlSeconds = ttlSeconds ?: room.defaultTtlSeconds,
-            ratchetStep = nextRatchetStep
-        )
+        val text = "📍 $label (${String.format(Locale.US, "%.5f, %.5f", latitude, longitude)})"
+        dispatchOrQueue(room, payload("LOCATION", text, meta), ttlSeconds ?: room.defaultTtlSeconds)
     }
 
     fun sendPollMessage(question: String, options: List<String>, ttlSeconds: Long? = null) {
         val room = _selectedRoom.value ?: return
-        val senderName = _myProfile.value?.username ?: "zero_${currentUserId.take(5)}"
-        val cleanOptions = options.map { it.trim() }.filter { it.isNotEmpty() }.take(5)
-        if (question.isBlank() || cleanOptions.size < 2) return
-        val nextRatchetStep = (_rawRoomEnvelopes.value.size + 1)
-
-        val optionsArray = JSONArray()
-        cleanOptions.forEachIndexed { idx, optText ->
-            optionsArray.put(
-                JSONObject().apply {
-                    put("index", idx)
-                    put("text", optText)
-                    put("voters", JSONArray())
-                }
-            )
+        val clean = options.map { it.trim() }.filter { it.isNotEmpty() }.take(5)
+        if (question.isBlank() || clean.size < 2) return
+        val arr = JSONArray()
+        clean.forEachIndexed { idx, text ->
+            arr.put(JSONObject().apply {
+                put("index", idx)
+                put("text", text)
+                put("voters", JSONArray())
+            })
         }
-        val meta = buildBaseMetaJson(nextRatchetStep).apply {
+        val meta = baseMeta().apply {
             put("question", question.trim())
-            put("options", optionsArray)
-        }.toString()
+            put("options", arr)
+        }
         _replyingToMessage.value = null
-
-        dispatchOrQueueMessage(
-            room = room,
-            senderName = senderName,
-            plaintext = "📊 Anket: ${question.trim()}",
-            messageType = "POLL",
-            encryptedMeta = meta,
-            ttlSeconds = ttlSeconds ?: room.defaultTtlSeconds,
-            ratchetStep = nextRatchetStep
-        )
+        dispatchOrQueue(room, payload("POLL", "📊 ${question.trim()}", meta), ttlSeconds ?: room.defaultTtlSeconds)
     }
 
-    private fun dispatchOrQueueMessage(
-        room: ChatRoom,
-        senderName: String,
-        plaintext: String,
-        messageType: String,
-        encryptedMeta: String,
-        ttlSeconds: Long,
-        ratchetStep: Int
-    ) {
+    private val outboxMutex = Mutex()
+
+    private fun dispatchOrQueue(room: ChatRoom, payload: JSONObject, ttlSeconds: Long, onSent: (() -> Unit)? = null) {
+        val envelopeId = ZeroChatRepository.newId("env_")
         viewModelScope.launch {
             if (_isOfflineQueueMode.value) {
-                vaultDao.enqueuePendingMessage(
-                    PendingOutboxEntity(
-                        ownerUid = currentUserId,
-                        roomId = room.id,
-                        roomTitle = room.title,
-                        roomKeyHint = room.roomKeyHint,
-                        participantUidsCsv = room.participantUids.joinToString(","),
-                        senderUsername = senderName,
-                        plaintext = plaintext,
-                        messageType = messageType,
-                        encryptedMeta = encryptedMeta,
-                        ttlSeconds = ttlSeconds
-                    )
-                )
-                _statusBannerMessage.value = "Mesaj çevrimdışı şifreli kuyruğa (Outbox) eklendi"
+                enqueue(room, envelopeId, payload, ttlSeconds)
+                banner("Mesaj çevrimdışı kuyruğa eklendi")
                 return@launch
             }
-
-            repository.sendEncryptedMessage(
-                room = room,
-                senderUsername = senderName,
-                plaintext = plaintext,
-                messageType = messageType,
-                encryptedMeta = encryptedMeta,
-                ttlSeconds = ttlSeconds,
-                ratchetStep = ratchetStep
-            ).onFailure {
-                // Automatically enqueue into offline outbox on network failure
-                vaultDao.enqueuePendingMessage(
-                    PendingOutboxEntity(
-                        ownerUid = currentUserId,
-                        roomId = room.id,
-                        roomTitle = room.title,
-                        roomKeyHint = room.roomKeyHint,
-                        participantUidsCsv = room.participantUids.joinToString(","),
-                        senderUsername = senderName,
-                        plaintext = plaintext,
-                        messageType = messageType,
-                        encryptedMeta = encryptedMeta,
-                        ttlSeconds = ttlSeconds
-                    )
-                )
-                _statusBannerMessage.value = "Ağ hatası: Mesaj yerel kuyruğa kaydedildi"
-            }
+            repository.sendMessage(room, payload, ttlSeconds, envelopeId)
+                .onSuccess { onSent?.invoke() }
+                .onFailure { error ->
+                    if (isNetworkError(error)) {
+                        enqueue(room, envelopeId, payload, ttlSeconds)
+                        banner("Ağ hatası: mesaj kuyruğa alındı, bağlantı gelince gönderilecek")
+                    } else {
+                        banner("Mesaj gönderilemedi: ${error.userMessage()}")
+                    }
+                }
         }
+    }
+
+    private fun isNetworkError(error: Throwable): Boolean =
+        generateSequence(error) { it.cause }
+            .filterIsInstance<com.google.firebase.firestore.FirebaseFirestoreException>()
+            .any { it.code == com.google.firebase.firestore.FirebaseFirestoreException.Code.UNAVAILABLE }
+
+    private suspend fun enqueue(room: ChatRoom, envelopeId: String, payload: JSONObject, ttlSeconds: Long) {
+        vaultDao.enqueuePendingMessage(
+            PendingOutboxEntity(
+                ownerUid = currentUserId,
+                roomId = room.id,
+                roomTitle = room.title,
+                envelopeId = envelopeId,
+                payloadJson = payload.toString(),
+                ttlSeconds = ttlSeconds
+            )
+        )
     }
 
     fun toggleOfflineQueueMode(enabled: Boolean) {
         _isOfflineQueueMode.value = enabled
-        if (!enabled) {
-            flushOfflineOutboxQueue()
-        } else {
-            _statusBannerMessage.value = "Çevrimdışı Kuyruk Modu Aktif: Mesajlar yerel Room kasasında bekletilecek"
+        if (!enabled) flushOfflineOutboxQueue() else banner("Çevrimdışı kuyruk modu açık")
+    }
+
+    /** Sends queued messages once each; safe to call concurrently (ids make sends idempotent). */
+    fun flushOfflineOutboxQueue() {
+        viewModelScope.launch {
+            outboxMutex.withLock {
+                val pending = vaultDao.getPendingOutboxList(currentUserId)
+                if (pending.isEmpty()) {
+                    banner("Bekleyen mesaj yok")
+                    return@withLock
+                }
+                val rooms = (roomsRaw.value as? UiState.Success)?.data.orEmpty()
+                var sent = 0
+                for (item in pending) {
+                    val room = rooms.firstOrNull { it.id == item.roomId }
+                    if (room == null) {
+                        vaultDao.deletePendingMessage(item.localId)
+                        continue
+                    }
+                    val payload = runCatching { JSONObject(item.payloadJson) }.getOrNull()
+                    if (payload == null) {
+                        vaultDao.deletePendingMessage(item.localId)
+                        continue
+                    }
+                    repository.sendMessage(room, payload, item.ttlSeconds, item.envelopeId)
+                        .onSuccess {
+                            vaultDao.deletePendingMessage(item.localId)
+                            sent++
+                        }
+                }
+                banner("$sent / ${pending.size} bekleyen mesaj gönderildi")
+            }
         }
     }
 
-    fun flushOfflineOutboxQueue() {
+    // ------------------------------------------------------------------ message actions
+
+    fun togglePinMessage(message: DecryptedMessageItem) {
+        val room = _selectedRoom.value ?: return
         viewModelScope.launch {
-            val pending = vaultDao.getPendingOutboxList(currentUserId)
-            if (pending.isEmpty()) {
-                _statusBannerMessage.value = "Bekleyen çevrimdışı mesaj bulunmuyor"
-                return@launch
+            val result = if (message.isPinned) {
+                repository.clearPins(room.id, message.id, room.participantUids.map { "${message.id}_${it}_${AnnotationKind.PIN}" })
+            } else {
+                repository.setAnnotation(room, message.id, AnnotationKind.PIN, "1")
             }
-            var sentCount = 0
-            pending.forEach { item ->
-                val tempRoom = ChatRoom(
-                    id = item.roomId,
-                    title = item.roomTitle,
-                    roomKeyHint = item.roomKeyHint,
-                    participantUids = item.participantUidsCsv.split(",").filter { it.isNotBlank() }
-                )
-                val ratchet = try {
-                    JSONObject(item.encryptedMeta).optInt("ratchetStep", 0)
-                } catch (_: Exception) {
-                    0
-                }
-                val res = repository.sendEncryptedMessage(
-                    room = tempRoom,
-                    senderUsername = item.senderUsername,
-                    plaintext = item.plaintext,
-                    messageType = item.messageType,
-                    encryptedMeta = item.encryptedMeta,
-                    ttlSeconds = item.ttlSeconds,
-                    ratchetStep = ratchet
-                )
-                if (res.isSuccess) {
-                    vaultDao.deletePendingMessage(item.localId)
-                    sentCount++
-                }
-            }
-            _statusBannerMessage.value = "$sentCount adet bekleyen şifreli zarf ağa iletildi"
+            result.onFailure { banner("Sabitleme değiştirilemedi: ${it.userMessage()}") }
+        }
+    }
+
+    /** Stars are private to this device. */
+    fun toggleStarMessage(message: DecryptedMessageItem) {
+        viewModelScope.launch {
+            vaultDao.updateMessageStarred(currentUserId, message.id, !message.isStarred)
+            banner(if (!message.isStarred) "Mesaj yıldızlandı ⭐" else "Yıldız kaldırıldı")
         }
     }
 
     fun voteInPoll(message: DecryptedMessageItem, optionIndex: Int) {
-        val voterHandle = _myProfile.value?.username ?: "zero_${currentUserId.take(4)}"
+        val room = _selectedRoom.value ?: return
         viewModelScope.launch {
-            try {
-                val root = JSONObject(message.encryptedMeta)
-                val optionsArr = root.optJSONArray("options") ?: return@launch
-                for (i in 0 until optionsArr.length()) {
-                    val optObj = optionsArr.getJSONObject(i)
-                    val votersArr = optObj.optJSONArray("voters") ?: JSONArray()
-                    val currentVoters = mutableListOf<String>()
-                    for (j in 0 until votersArr.length()) {
-                        val v = votersArr.getString(j)
-                        if (v != voterHandle) currentVoters.add(v)
-                    }
-                    if (i == optionIndex) {
-                        currentVoters.add(voterHandle)
-                    }
-                    optObj.put("voters", JSONArray(currentVoters))
-                }
-                repository.updateEnvelopeMeta(message.id, root.toString())
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to update poll vote", e)
-            }
+            repository.setAnnotation(room, message.id, AnnotationKind.VOTE, optionIndex.toString())
+                .onFailure { banner("Oy verilemedi: ${it.userMessage()}") }
         }
     }
 
     fun toggleMessageReaction(message: DecryptedMessageItem, emoji: String) {
-        val myHandle = _myProfile.value?.username ?: currentUserId.take(6)
-        val currentMap = message.reactions.toMutableMap()
-        if (currentMap[myHandle] == emoji) {
-            currentMap.remove(myHandle)
-        } else {
-            currentMap[myHandle] = emoji
-        }
-        val serialized = currentMap.entries.joinToString(",") { "${it.key}:${it.value}" }
+        val room = _selectedRoom.value ?: return
+        val mine = message.reactions[myHandle]
         viewModelScope.launch {
-            repository.updateEnvelopeReaction(message.id, serialized)
+            repository.setAnnotation(room, message.id, AnnotationKind.REACTION, if (mine == emoji) null else emoji)
+                .onFailure { banner("Tepki eklenemedi: ${it.userMessage()}") }
         }
     }
 
+    /** Deletes one of my messages for everyone. */
     fun burnMessageNow(messageId: String) {
         viewModelScope.launch {
-            repository.burnEnvelope(messageId)
-            _statusBannerMessage.value = "Mesaj zarfı kalıcı olarak imha edildi"
-        }
-    }
-
-    fun toggleRoomVaultLock(roomId: String, currentlyLocked: Boolean) {
-        viewModelScope.launch {
-            if (currentlyLocked) {
-                vaultDao.unlockRoom(roomId)
-                _statusBannerMessage.value = "Sohbet gizli kasadan çıkarıldı"
-            } else {
-                vaultDao.setRoomLocked(LockedRoomEntity(roomId = roomId, isSecretVault = true))
-                _statusBannerMessage.value = "Sohbet PIN korumalı Gizli Kasaya taşındı"
-            }
-        }
-    }
-
-    fun toggleScreenShield(enabled: Boolean) {
-        viewModelScope.launch {
-            val current = vaultDao.getSecurityConfig(currentUserId) ?: VaultSecurityConfigEntity(
-                ownerUid = currentUserId,
-                normalPinHash = CryptoEngine.hashPin("1337"),
-                panicPinHash = CryptoEngine.hashPin("9999")
-            )
-            vaultDao.saveSecurityConfig(current.copy(screenShieldEnabled = enabled))
-            _statusBannerMessage.value = if (enabled) {
-                "Ekran Görüntüsü Engeli (FLAG_SECURE) Etkinleştirildi"
-            } else {
-                "Ekran Görüntüsü Engeli Kapatıldı"
-            }
-        }
-    }
-
-    fun exportEncryptedBackup(password: String) {
-        if (password.length < 4) {
-            _statusBannerMessage.value = "Yedekleme parolası en az 4 karakter olmalıdır"
-            return
-        }
-        viewModelScope.launch {
-            val messages = vaultDao.getAllCachedMessages(currentUserId)
-            val arr = JSONArray()
-            messages.forEach { m ->
-                arr.put(
-                    JSONObject().apply {
-                        put("messageId", m.messageId)
-                        put("roomId", m.roomId)
-                        put("roomTitle", m.roomTitle)
-                        put("senderUsername", m.senderUsername)
-                        put("decryptedText", m.decryptedText)
-                        put("ciphertext", m.ciphertext)
-                        put("iv", m.iv)
-                        put("messageType", m.messageType)
-                        put("createdAtMillis", m.createdAtMillis)
-                    }
-                )
-            }
-            val root = JSONObject().apply {
-                put("ownerUid", currentUserId)
-                put("exportedAtMillis", System.currentTimeMillis())
-                put("messagesCount", messages.size)
-                put("messages", arr)
-            }.toString()
-
-            val encryptedVault = CryptoEngine.encryptBackupArchive(root, password)
-            _exportedVaultBackupText.value = encryptedVault
-            _statusBannerMessage.value = "${messages.size} mesaj PBKDF2 + AES-256-GCM ile .zcvault formatında şifrelendi"
-        }
-    }
-
-    fun importEncryptedBackup(vaultPayload: String, password: String) {
-        viewModelScope.launch {
-            CryptoEngine.decryptBackupArchive(vaultPayload, password)
-                .onSuccess { jsonStr ->
-                    val root = JSONObject(jsonStr)
-                    val arr = root.optJSONArray("messages") ?: JSONArray()
-                    val restored = mutableListOf<CachedVaultMessageEntity>()
-                    for (i in 0 until arr.length()) {
-                        val obj = arr.getJSONObject(i)
-                        restored.add(
-                            CachedVaultMessageEntity(
-                                messageId = obj.optString("messageId", "restored_$i"),
-                                ownerUid = currentUserId,
-                                roomId = obj.optString("roomId", ""),
-                                roomTitle = obj.optString("roomTitle", "Yedek Oda"),
-                                senderUsername = obj.optString("senderUsername", "zero"),
-                                decryptedText = obj.optString("decryptedText", ""),
-                                ciphertext = obj.optString("ciphertext", ""),
-                                iv = obj.optString("iv", ""),
-                                messageType = obj.optString("messageType", "TEXT"),
-                                createdAtMillis = obj.optLong("createdAtMillis", System.currentTimeMillis())
-                            )
-                        )
-                    }
-                    vaultDao.cacheDecryptedMessages(restored)
-                    _statusBannerMessage.value = ".zcvault yedeği doğrulandı: ${restored.size} şifreli kayıt kasaya geri yüklendi!"
-                }
-                .onFailure { err ->
-                    _statusBannerMessage.value = "Yedek çözülemedi (Parola veya veri hatası): ${err.localizedMessage}"
-                }
-        }
-    }
-
-    fun verifyPinInput(pinInput: String): String {
-        val config = securityConfig.value
-        val inputHash = CryptoEngine.hashPin(pinInput.trim())
-        val normalHash = config?.normalPinHash ?: CryptoEngine.hashPin("1337")
-        val panicHash = config?.panicPinHash ?: CryptoEngine.hashPin("9999")
-
-        return when (inputHash) {
-            panicHash -> {
-                _isPanicModeActive.value = true
-                _isVaultUnlocked.value = false
-                closeRoom()
-                _statusBannerMessage.value = "Acil Durum (Panik) Modu Etkinleştirildi"
-                "PANIC"
-            }
-            normalHash -> {
-                _isPanicModeActive.value = false
-                _isVaultUnlocked.value = true
-                _statusBannerMessage.value = "Gizli Kasa Kilidi Açıldı"
-                "UNLOCKED"
-            }
-            else -> {
-                _statusBannerMessage.value = "Hatalı PIN Kodu"
-                "INVALID"
-            }
-        }
-    }
-
-    fun unlockVaultWithBiometrics() {
-        val cfg = securityConfig.value
-        if (cfg?.biometricUnlockEnabled == false) {
-            _statusBannerMessage.value = "Biyometrik kilit açma devre dışı bırakılmış"
-            return
-        }
-        _isPanicModeActive.value = false
-        _isVaultUnlocked.value = true
-        _statusBannerMessage.value = "Donanım Biyometrik Sensörü Doğrulandı: Gizli Kasa Açıldı 🔓"
-    }
-
-    fun toggleBiometricUnlock(enabled: Boolean) {
-        viewModelScope.launch {
-            val current = vaultDao.getSecurityConfig(currentUserId) ?: VaultSecurityConfigEntity(
-                ownerUid = currentUserId,
-                normalPinHash = CryptoEngine.hashPin("1337"),
-                panicPinHash = CryptoEngine.hashPin("9999")
-            )
-            vaultDao.saveSecurityConfig(current.copy(biometricUnlockEnabled = enabled))
-            _statusBannerMessage.value = if (enabled) {
-                "Biyometrik Kasa Kilidi Etkinleştirildi"
-            } else {
-                "Biyometrik Kasa Kilidi Kapatıldı"
-            }
-        }
-    }
-
-    fun toggleAutoLockOnBackground(enabled: Boolean) {
-        viewModelScope.launch {
-            val current = vaultDao.getSecurityConfig(currentUserId) ?: VaultSecurityConfigEntity(
-                ownerUid = currentUserId,
-                normalPinHash = CryptoEngine.hashPin("1337"),
-                panicPinHash = CryptoEngine.hashPin("9999")
-            )
-            vaultDao.saveSecurityConfig(current.copy(autoLockOnBackground = enabled))
-            _statusBannerMessage.value = if (enabled) {
-                "Arka Planda Otomatik Kasa Kilitleme Aktif"
-            } else {
-                "Arka Planda Otomatik Kasa Kilitleme Kapatıldı"
-            }
-        }
-    }
-
-    fun onAppBackgrounded() {
-        val cfg = securityConfig.value
-        if (cfg?.autoLockOnBackground != false && _isVaultUnlocked.value) {
-            _isVaultUnlocked.value = false
-        }
-    }
-
-    fun lockVaultAndExitPanicMode() {
-        _isVaultUnlocked.value = false
-        _isPanicModeActive.value = false
-    }
-
-    fun updateVaultPins(newNormalPin: String, newPanicPin: String) {
-        if (newNormalPin.length < 4 || newPanicPin.length < 4) {
-            _statusBannerMessage.value = "PIN kodları en az 4 haneli olmalıdır"
-            return
-        }
-        if (newNormalPin == newPanicPin) {
-            _statusBannerMessage.value = "Normal PIN ve Panik PIN birbirinden farklı olmalıdır"
-            return
-        }
-        viewModelScope.launch {
-            val existing = vaultDao.getSecurityConfig(currentUserId)
-            vaultDao.saveSecurityConfig(
-                VaultSecurityConfigEntity(
-                    ownerUid = currentUserId,
-                    normalPinHash = CryptoEngine.hashPin(newNormalPin.trim()),
-                    panicPinHash = CryptoEngine.hashPin(newPanicPin.trim()),
-                    autoBurnDefaultSeconds = 0L,
-                    screenShieldEnabled = existing?.screenShieldEnabled ?: false,
-                    biometricUnlockEnabled = existing?.biometricUnlockEnabled ?: true,
-                    autoLockOnBackground = existing?.autoLockOnBackground ?: true
-                )
-            )
-            _statusBannerMessage.value = "Gizli Kasa PIN ve Sahte Panik PIN kodları güncellendi"
-        }
-    }
-
-    fun publishStatusStory(text: String, colorHex: String) {
-        val author = _myProfile.value?.username ?: "zero_${currentUserId.take(5)}"
-        if (text.isBlank()) return
-        viewModelScope.launch {
-            repository.postEncryptedStatus(author, text.trim(), colorHex)
+            repository.deleteMessage(messageId)
                 .onSuccess {
-                    _statusBannerMessage.value = "24 saatlik uçtan uca şifreli durum paylaşıldı"
+                    vaultDao.deleteCachedMessages(listOf(messageId))
+                    banner("Mesaj silindi")
                 }
+                .onFailure { banner("Yalnızca kendi mesajlarınızı silebilirsiniz") }
         }
     }
 
-    fun startP2PCall(calleeUid: String, calleeUsername: String, callType: String) {
-        val callerName = _myProfile.value?.username ?: "zero_${currentUserId.take(5)}"
-        viewModelScope.launch {
-            repository.startEncryptedCall(
-                callerUsername = callerName,
-                calleeUid = calleeUid,
-                calleeUsername = calleeUsername,
-                callType = callType,
-                initialStatus = "RINGING"
-            ).onSuccess { signal ->
-                _activeCall.value = signal
-            }.onFailure { err ->
-                _statusBannerMessage.value = "Arama başlatılamadı: ${err.localizedMessage}"
-            }
-        }
-    }
-
-    fun acceptIncomingCall(call: CallSignal) {
-        dismissedCallIdsInSession.add(call.id)
-        _activeCall.value = call.copy(status = "CONNECTED")
-        if (call.id.isNotBlank()) {
-            viewModelScope.launch {
-                repository.acceptEncryptedCall(call.id)
-            }
-        }
-    }
-
-    fun pushActiveCallMediaChunk(audioB64: String? = null, videoB64: String? = null) {
-        val current = _activeCall.value ?: return
-        if (current.status != "CONNECTED" || current.id.isBlank()) return
-        val isCaller = current.callerId == currentUserId
-        val nextSeq = current.mediaSeq + 1L
-        viewModelScope.launch {
-            repository.pushCallMediaChunk(
-                callId = current.id,
-                isCaller = isCaller,
-                audioB64 = audioB64,
-                videoB64 = videoB64,
-                nextSeq = nextSeq
-            )
-        }
-    }
-
-    fun declineIncomingCall(call: CallSignal) {
-        dismissedCallIdsInSession.add(call.id)
-        if (call.id.isNotBlank()) {
-            viewModelScope.launch {
-                repository.endEncryptedCall(call.id)
-            }
-        }
-        _statusBannerMessage.value = "@${call.callerUsername} gelen araması reddedildi"
-    }
-
-    fun endActiveCall() {
-        val current = _activeCall.value ?: return
-        _activeCall.value = null
-        viewModelScope.launch {
-            if (current.id.isNotBlank()) {
-                repository.endEncryptedCall(current.id)
-            }
-        }
-    }
-
-    fun togglePinRoom(roomId: String, currentlyPinned: Boolean) {
-        viewModelScope.launch {
-            if (currentlyPinned) {
-                vaultDao.unpinRoom(currentUserId, roomId)
-                _statusBannerMessage.value = "Sohbet sabitlemesi kaldırıldı"
-            } else {
-                vaultDao.pinRoom(PinnedRoomEntity(ownerUid = currentUserId, roomId = roomId))
-                _statusBannerMessage.value = "📌 Sohbet listenin en üstüne sabitlendi"
-            }
-        }
-    }
-
-    fun verifyActiveRoomIdentity() {
+    /** Deletes all messages I sent in the open room and hides older history locally. */
+    fun nukeActiveRoomHistory() {
         val room = _selectedRoom.value ?: return
-        val handle = room.peerHandleFor(_myProfile.value?.username).trim().lowercase(Locale.ROOT)
-        val peers = (directoryUsersState.value as? UiState.Success)?.data ?: emptyList()
-        val matchedPeer = peers.firstOrNull { it.username.lowercase(Locale.ROOT) == handle }
-        val pubKey = matchedPeer?.publicKey ?: room.roomKeyHint
-        val safetyFp = matchedPeer?.safetyFingerprint ?: CryptoEngine.deriveCanonicalSafetyNumber(
-            usernameA = _myProfile.value?.username,
-            usernameB = handle,
-            fallbackSeed = room.effectiveRoomKeyHint
-        )
-
         viewModelScope.launch {
-            vaultDao.saveVerifiedPeer(
-                VerifiedPeerEntity(
-                    ownerUid = currentUserId,
-                    peerUsername = handle,
-                    verifiedPublicKey = pubKey,
-                    verifiedSafetyFingerprint = safetyFp
-                )
-            )
-            _statusBannerMessage.value = "🛡️ @$handle güvenli kişi olarak doğrulandı!"
+            vaultDao.deleteCachedMessagesForRoom(currentUserId, room.id)
+            repository.deleteMyMessages(room.id)
+                .onSuccess { count ->
+                    vaultDao.hideRoom(HiddenRoomEntity(ownerUid = currentUserId, roomId = room.id))
+                    banner("Gönderdiğiniz $count mesaj silindi, geçmiş bu cihazda temizlendi")
+                }
+                .onFailure { banner("Geçmiş temizlenemedi: ${it.userMessage()}") }
         }
     }
+
+    fun notifySecureClipboardCopied() = banner("📋 Panoya kopyalandı (30 sn sonra temizlenecek)")
+
+    // ------------------------------------------------------------------ scheduled messages
+
+    private val scheduleWakeup = Channel<Unit>(Channel.CONFLATED)
 
     fun scheduleEncryptedMessage(plaintext: String, delaySeconds: Long, ttlOverride: Long?) {
         val room = _selectedRoom.value ?: return
-        val cleaned = plaintext.trim()
-        if (cleaned.isEmpty()) return
-        val ttl = ttlOverride ?: room.defaultTtlSeconds
-        val targetMillis = System.currentTimeMillis() + (delaySeconds.coerceAtLeast(5L) * 1000L)
+        val clean = plaintext.trim()
+        if (clean.isEmpty()) return
+        val target = System.currentTimeMillis() + delaySeconds.coerceAtLeast(5L) * 1000L
         viewModelScope.launch {
             vaultDao.insertScheduledEnvelope(
                 ScheduledEnvelopeEntity(
                     ownerUid = currentUserId,
                     roomId = room.id,
                     roomTitle = room.title,
-                    plaintext = cleaned,
-                    ttlSeconds = ttl,
-                    scheduledAtMillis = targetMillis
+                    envelopeId = ZeroChatRepository.newId("env_"),
+                    payloadJson = payload("TEXT", clean, JSONObject()).toString(),
+                    plaintext = clean,
+                    ttlSeconds = ttlOverride ?: room.defaultTtlSeconds,
+                    scheduledAtMillis = target
                 )
             )
-            _statusBannerMessage.value = "⏳ Mesaj ${delaySeconds} sn sonra gönderilmek üzere zamanlandı"
+            scheduleWakeup.trySend(Unit)
+            banner("⏳ Mesaj $delaySeconds sn sonra gönderilecek")
         }
     }
 
     fun cancelScheduledMessage(id: Long) {
         viewModelScope.launch {
             vaultDao.deleteScheduledEnvelope(id)
-            _statusBannerMessage.value = "Zamanlanmış mesaj iptal edildi"
+            banner("Zamanlanmış mesaj iptal edildi")
         }
     }
 
-    fun nukeActiveRoomHistory() {
-        val room = _selectedRoom.value ?: return
-        val senderName = _myProfile.value?.username ?: "zero_${currentUserId.take(5)}"
+    /** Sleeps until the next scheduled message is due instead of polling every second. */
+    private fun startScheduledDispatcher() {
         viewModelScope.launch {
-            vaultDao.deleteCachedMessagesForRoom(currentUserId, room.id)
-            repository.nukeRoomHistory(room, senderName)
-                .onSuccess { count ->
-                    _rawRoomEnvelopes.value = emptyList()
-                    _statusBannerMessage.value = "🧹 Sohbet geçmişi temizlendi ($count mesaj silindi)"
+            while (true) {
+                val next = runCatching { vaultDao.nextScheduledAt(currentUserId) }.getOrNull()
+                if (next == null) {
+                    scheduleWakeup.receive()
+                    continue
                 }
-                .onFailure { err ->
-                    _statusBannerMessage.value = "Sohbet geçmişi temizlenemedi: ${err.localizedMessage}"
+                val wait = next - System.currentTimeMillis()
+                if (wait > 0) {
+                    kotlinx.coroutines.withTimeoutOrNull(wait) { scheduleWakeup.receive() }
+                    continue
                 }
+                dispatchDueScheduled()
+                delay(1000L)
+            }
+        }
+    }
+
+    private suspend fun dispatchDueScheduled() {
+        val due = runCatching { vaultDao.getDueScheduledEnvelopes(currentUserId, System.currentTimeMillis()) }.getOrDefault(emptyList())
+        val rooms = (roomsRaw.value as? UiState.Success)?.data.orEmpty()
+        for (item in due) {
+            val room = rooms.firstOrNull { it.id == item.roomId }
+            val payload = runCatching { JSONObject(item.payloadJson) }.getOrNull()
+            if (room == null || payload == null) {
+                // Rooms may not be loaded yet right after start; retry later unless the data is broken.
+                if (payload == null) vaultDao.deleteScheduledEnvelope(item.id)
+                continue
+            }
+            repository.sendMessage(room, payload, item.ttlSeconds, item.envelopeId)
+                .onSuccess {
+                    vaultDao.deleteScheduledEnvelope(item.id)
+                    banner("⏳ Zamanlanmış mesaj gönderildi: ${item.roomTitle}")
+                }
+                .onFailure { Log.w(TAG, "scheduled send failed, will retry", it) }
+        }
+    }
+
+    // ------------------------------------------------------------------ statuses
+
+    fun publishStatusStory(text: String, colorHex: String) {
+        if (text.isBlank()) return
+        viewModelScope.launch {
+            val rooms = (roomsRaw.value as? UiState.Success)?.data.orEmpty().filter { it.isApprovedConnection }
+            val audienceUids = rooms.flatMap { it.participantUids }.toSet() - currentUserId
+            val audience = audienceUids.mapNotNull { profilesByUid.value[it] ?: repository.getProfile(it) }
+            repository.postStatus(text, colorHex, audience)
+                .onSuccess { banner("Durum ${audience.size} kişiyle şifreli olarak paylaşıldı") }
+                .onFailure { banner("Durum paylaşılamadı: ${it.userMessage()}") }
         }
     }
 
     fun onViewStatusStory(status: DecryptedStatusItem) {
-        if (status.id.isNotBlank() && status.userId != currentUserId) {
-            viewModelScope.launch {
-                repository.incrementStatusViewCount(status.id, status.viewCount)
+        if (status.userId == currentUserId) return
+        viewModelScope.launch { repository.markStatusViewed(status.id) }
+    }
+
+    fun replyToStatusStory(status: DecryptedStatusItem, replyText: String) {
+        val clean = replyText.trim()
+        if (clean.isEmpty() || status.userId == currentUserId) return
+        val room = (roomsRaw.value as? UiState.Success)?.data?.firstOrNull {
+            !it.isGroup && it.isApprovedConnection && it.participantUids.contains(status.userId)
+        }
+        if (room == null) {
+            banner("Duruma yanıt için önce @${status.authorUsername} ile sohbetiniz olmalı")
+            return
+        }
+        val meta = JSONObject().apply {
+            put("replyToSender", status.authorUsername)
+            put("replyToPreview", "📖 Durum: ${status.decryptedContent.take(60)}")
+        }
+        dispatchOrQueue(room, payload("TEXT", clean, meta), room.defaultTtlSeconds) {
+            banner("@${status.authorUsername} durumuna yanıt gönderildi")
+        }
+    }
+
+    // ------------------------------------------------------------------ calls
+
+    /** Starts a call with the peer of an existing, accepted direct conversation. */
+    fun startP2PCall(calleeUid: String, calleeUsername: String, callType: String) {
+        val room = (roomsRaw.value as? UiState.Success)?.data?.firstOrNull {
+            !it.isGroup && it.participantUids.contains(calleeUid) && it.participantUids.contains(currentUserId)
+        }
+        if (room == null) {
+            banner("@$calleeUsername ile aramak için önce sohbet başlatın")
+            return
+        }
+        viewModelScope.launch {
+            repository.startCall(room, callType)
+                .onSuccess {
+                    outgoingSeq = 0L
+                    activeCallId.value = it.id
+                }
+                .onFailure { banner("Arama başlatılamadı: ${it.userMessage()}") }
+        }
+    }
+
+    fun acceptIncomingCall(call: CallSignal) {
+        dismissedCallIds.add(call.id)
+        viewModelScope.launch {
+            repository.setCallStatus(call.id, CallStatus.CONNECTED)
+                .onSuccess {
+                    outgoingSeq = 0L
+                    activeCallId.value = call.id
+                }
+                .onFailure { banner("Arama yanıtlanamadı: ${it.userMessage()}") }
+        }
+    }
+
+    fun declineIncomingCall(call: CallSignal) {
+        dismissedCallIds.add(call.id)
+        viewModelScope.launch { repository.setCallStatus(call.id, CallStatus.ENDED) }
+    }
+
+    fun pushActiveCallMediaChunk(audioB64: String? = null, videoB64: String? = null) {
+        val call = activeCallDoc.value ?: return
+        if (call.status != CallStatus.CONNECTED) return
+        val seq = ++outgoingSeq
+        viewModelScope.launch(Dispatchers.Default) { repository.pushCallMedia(call, seq, audioB64, videoB64) }
+    }
+
+    fun endActiveCall() {
+        val id = activeCallId.value ?: return
+        activeCallId.value = null
+        viewModelScope.launch { repository.setCallStatus(id, CallStatus.ENDED) }
+    }
+
+    // ------------------------------------------------------------------ vault, PIN & panic mode
+
+    /** Returns UNLOCKED, PANIC, INVALID, NOT_SET or LOCKED_OUT. */
+    fun verifyPinInput(pinInput: String): String {
+        val cfg = securityConfig.value
+        if (cfg == null || !cfg.hasPins) {
+            banner("Önce Profil ve Kasa sekmesinden normal ve panik PIN'lerini belirleyin")
+            return "NOT_SET"
+        }
+        val now = System.currentTimeMillis()
+        if (cfg.lockoutUntilMillis > now) {
+            banner("Çok fazla hatalı deneme. ${(cfg.lockoutUntilMillis - now) / 1000 + 1} sn bekleyin")
+            return "LOCKED_OUT"
+        }
+        val pin = pinInput.trim()
+        return when {
+            CryptoEngine.verifyPin(pin, cfg.pinSalt, cfg.panicPinHash) -> {
+                resetPinAttempts(cfg)
+                _isPanicModeActive.value = true
+                _isVaultUnlocked.value = false
+                closeRoom()
+                endActiveCall()
+                "PANIC"
+            }
+            CryptoEngine.verifyPin(pin, cfg.pinSalt, cfg.normalPinHash) -> {
+                resetPinAttempts(cfg)
+                _isPanicModeActive.value = false
+                _isVaultUnlocked.value = true
+                banner("Gizli kasa açıldı")
+                "UNLOCKED"
+            }
+            else -> {
+                val attempts = cfg.failedAttempts + 1
+                val lockout = if (attempts >= MAX_PIN_ATTEMPTS) {
+                    now + (30_000L shl (attempts - MAX_PIN_ATTEMPTS).coerceAtMost(8))
+                } else {
+                    0L
+                }
+                viewModelScope.launch {
+                    vaultDao.saveSecurityConfig(cfg.copy(failedAttempts = attempts, lockoutUntilMillis = lockout))
+                }
+                banner("Hatalı PIN")
+                "INVALID"
             }
         }
     }
 
-    fun replyToStatusStory(status: DecryptedStatusItem, replyText: String) {
-        val cleaned = replyText.trim()
-        if (cleaned.isEmpty()) return
-        val me = _myProfile.value ?: UserProfile(
-            id = currentUserId,
-            userId = currentUserId,
-            username = "zero_${currentUserId.take(5)}",
-            displayName = "Zero Node"
-        )
-        val peers = (directoryUsersState.value as? UiState.Success)?.data ?: emptyList()
-        val authorPeer = peers.firstOrNull {
-            it.userId == status.userId || it.username.equals(status.authorUsername, ignoreCase = true)
-        } ?: UserProfile(
-            id = status.userId.ifBlank { "peer_${status.authorUsername}" },
-            userId = status.userId.ifBlank { currentUserId },
-            username = status.authorUsername,
-            displayName = status.authorUsername
-        )
+    private fun resetPinAttempts(cfg: VaultSecurityConfigEntity) {
+        if (cfg.failedAttempts == 0 && cfg.lockoutUntilMillis == 0L) return
+        viewModelScope.launch { vaultDao.saveSecurityConfig(cfg.copy(failedAttempts = 0, lockoutUntilMillis = 0L)) }
+    }
 
+    /** Biometrics open the vault but never leave panic mode (that needs the normal PIN). */
+    fun unlockVaultWithBiometrics() {
+        val cfg = securityConfig.value
+        if (cfg?.biometricUnlockEnabled == false) {
+            banner("Biyometrik kilit açma kapalı")
+            return
+        }
+        if (_isPanicModeActive.value) return
+        _isVaultUnlocked.value = true
+        banner("Gizli kasa açıldı 🔓")
+    }
+
+    /** Locks the vault. Panic mode is only left by entering the normal PIN. */
+    fun lockVaultAndExitPanicMode() {
+        _isVaultUnlocked.value = false
+    }
+
+    fun onAppBackgrounded() {
+        if (securityConfig.value?.autoLockOnBackground != false) _isVaultUnlocked.value = false
+    }
+
+    fun updateVaultPins(newNormalPin: String, newPanicPin: String) {
+        val normal = newNormalPin.trim()
+        val panic = newPanicPin.trim()
+        if (normal.length < CryptoEngine.MIN_PIN_LENGTH || panic.length < CryptoEngine.MIN_PIN_LENGTH ||
+            !normal.all { it.isDigit() } || !panic.all { it.isDigit() }
+        ) {
+            banner("PIN'ler en az ${CryptoEngine.MIN_PIN_LENGTH} haneli rakamlardan oluşmalı")
+            return
+        }
+        if (normal == panic) {
+            banner("Normal PIN ve panik PIN farklı olmalı")
+            return
+        }
         viewModelScope.launch {
-            repository.createOrGetDirectRoom(me, authorPeer)
-                .onSuccess { room ->
-                    val metaJson = JSONObject().apply {
-                        put("replyToSender", status.authorUsername)
-                        put("replyToPreview", "📖 Durum: ${status.decryptedContent.take(60)}")
-                        put("ratchetStep", 1)
-                    }.toString()
-                    repository.sendEncryptedMessage(
-                        room = room,
-                        senderUsername = me.username,
-                        plaintext = cleaned,
-                        messageType = "TEXT",
-                        encryptedMeta = metaJson,
-                        ttlSeconds = room.defaultTtlSeconds,
-                        ratchetStep = 1
-                    ).onSuccess {
-                        _statusBannerMessage.value = "⚡ @${status.authorUsername} durumuna şifreli yanıt iletildi!"
-                    }
-                }
-                .onFailure { err ->
-                    _statusBannerMessage.value = "Durum yanıtı gönderilemedi: ${err.localizedMessage}"
-                }
+            val salt = CryptoEngine.newSaltB64()
+            val (normalHash, panicHash) = withContext(Dispatchers.Default) {
+                CryptoEngine.hashPin(normal, salt) to CryptoEngine.hashPin(panic, salt)
+            }
+            val existing = vaultDao.getSecurityConfig(currentUserId) ?: VaultSecurityConfigEntity(ownerUid = currentUserId)
+            vaultDao.saveSecurityConfig(
+                existing.copy(
+                    pinSalt = salt,
+                    normalPinHash = normalHash,
+                    panicPinHash = panicHash,
+                    failedAttempts = 0,
+                    lockoutUntilMillis = 0L,
+                    updatedAtMillis = System.currentTimeMillis()
+                )
+            )
+            banner("Kasa PIN'leri kaydedildi")
         }
     }
 
-    fun notifySecureClipboardCopied() {
-        _statusBannerMessage.value = "📋 Mesaj güvenli panoya kopyalandı (30 sn sonra otomatik temizlenecek)"
+    private fun updateConfig(message: String, transform: (VaultSecurityConfigEntity) -> VaultSecurityConfigEntity) {
+        viewModelScope.launch {
+            val existing = vaultDao.getSecurityConfig(currentUserId) ?: VaultSecurityConfigEntity(ownerUid = currentUserId)
+            vaultDao.saveSecurityConfig(transform(existing).copy(updatedAtMillis = System.currentTimeMillis()))
+            banner(message)
+        }
     }
 
-    private fun parseReactionsMap(summary: String): Map<String, String> {
-        if (summary.isBlank()) return emptyMap()
-        return summary.split(",")
-            .mapNotNull { entry ->
-                val parts = entry.split(":")
-                if (parts.size == 2 && parts[0].isNotBlank() && parts[1].isNotBlank()) {
-                    parts[0] to parts[1]
-                } else {
-                    null
+    fun toggleScreenShield(enabled: Boolean) =
+        updateConfig(if (enabled) "Ekran görüntüsü engeli açık" else "Ekran görüntüsü engeli kapalı") { it.copy(screenShieldEnabled = enabled) }
+
+    fun toggleBiometricUnlock(enabled: Boolean) =
+        updateConfig(if (enabled) "Biyometrik kilit açma açık" else "Biyometrik kilit açma kapalı") { it.copy(biometricUnlockEnabled = enabled) }
+
+    fun toggleAutoLockOnBackground(enabled: Boolean) =
+        updateConfig(if (enabled) "Arka planda otomatik kilit açık" else "Arka planda otomatik kilit kapalı") { it.copy(autoLockOnBackground = enabled) }
+
+    // ------------------------------------------------------------------ backups
+
+    fun exportEncryptedBackup(password: String) {
+        if (password.length < CryptoEngine.MIN_BACKUP_PASSWORD_LENGTH) {
+            banner("Yedek parolası en az ${CryptoEngine.MIN_BACKUP_PASSWORD_LENGTH} karakter olmalı")
+            return
+        }
+        viewModelScope.launch {
+            // Self-destructing messages are never exported.
+            val messages = vaultDao.getBackupableMessages(currentUserId)
+            val arr = JSONArray()
+            messages.forEach { m ->
+                arr.put(JSONObject().apply {
+                    put("messageId", m.messageId)
+                    put("roomId", m.roomId)
+                    put("roomTitle", m.roomTitle)
+                    put("senderUsername", m.senderUsername)
+                    put("decryptedText", m.decryptedText)
+                    put("messageType", m.messageType)
+                    put("isStarred", m.isStarred)
+                    put("createdAtMillis", m.createdAtMillis)
+                })
+            }
+            val root = JSONObject().apply {
+                put("ownerUid", currentUserId)
+                put("exportedAtMillis", System.currentTimeMillis())
+                put("messages", arr)
+            }.toString()
+            val encrypted = withContext(Dispatchers.Default) { CryptoEngine.encryptBackupArchive(root, password) }
+            _exportedVaultBackupText.value = encrypted
+            banner("${messages.size} mesaj parolayla şifrelenerek dışa aktarıldı")
+        }
+    }
+
+    fun clearExportedBackup() {
+        _exportedVaultBackupText.value = null
+    }
+
+    fun importEncryptedBackup(vaultPayload: String, password: String) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.Default) {
+                CryptoEngine.decryptBackupArchive(vaultPayload, password).mapCatching { json ->
+                    val arr = JSONObject(json).optJSONArray("messages") ?: JSONArray()
+                    (0 until arr.length()).map { i ->
+                        val o = arr.getJSONObject(i)
+                        CachedVaultMessageEntity(
+                            messageId = o.optString("messageId", "restored_$i"),
+                            ownerUid = currentUserId,
+                            roomId = o.optString("roomId"),
+                            roomTitle = o.optString("roomTitle", "Yedek"),
+                            senderUsername = o.optString("senderUsername"),
+                            decryptedText = o.optString("decryptedText"),
+                            messageType = o.optString("messageType", "TEXT"),
+                            isStarred = o.optBoolean("isStarred", false),
+                            createdAtMillis = o.optLong("createdAtMillis", System.currentTimeMillis())
+                        )
+                    }
                 }
-            }.toMap()
+            }
+            result
+                .onSuccess {
+                    vaultDao.cacheDecryptedMessages(it)
+                    banner("Yedekten ${it.size} mesaj geri yüklendi")
+                }
+                .onFailure { banner("Yedek açılamadı: parola yanlış veya dosya bozuk") }
+        }
+    }
+
+    // ------------------------------------------------------------------ sign-out
+
+    /** Ends calls, marks the user offline and wipes decrypted local data before signing out. */
+    fun prepareSignOut(onDone: () -> Unit) {
+        viewModelScope.launch {
+            endActiveCall()
+            runCatching { repository.setPresence(false) }
+            vaultDao.clearCachedMessages(currentUserId)
+            vaultDao.clearOutbox(currentUserId)
+            vaultDao.clearScheduled(currentUserId)
+            _exportedVaultBackupText.value = null
+            repository.clearCaches()
+            onDone()
+        }
+    }
+
+    @OptIn(kotlinx.coroutines.DelicateCoroutinesApi::class)
+    override fun onCleared() {
+        activeCallId.value?.let { id ->
+            // Best effort: the ViewModel scope is gone, so use a detached call.
+            kotlinx.coroutines.GlobalScope.launch { runCatching { repository.setCallStatus(id, CallStatus.ENDED) } }
+        }
+        super.onCleared()
     }
 
     companion object {
         private const val TAG = "ZeroChatVM"
+        private const val TYPING_WINDOW_MS = 6_000L
+        private const val TYPING_THROTTLE_MS = 3_000L
+        private const val RING_TIMEOUT_MS = 45_000L
+        private const val DAY_MS = 24L * 3600L * 1000L
+        private const val MAX_PIN_ATTEMPTS = 5
+        /** Base64 budget per media message (encrypted payload stays under the 700 KB rule limit). */
+        const val MAX_MEDIA_B64 = 480_000
+        const val MAX_FILE_KB = 350
+        const val MAX_VOICE_SECONDS = 120
 
-        fun parsePollOptions(encryptedMeta: String): Pair<String, List<PollOptionItem>> {
-            return try {
-                val obj = JSONObject(encryptedMeta)
-                val q = obj.optString("question", "Şifreli Anket")
-                val arr = obj.optJSONArray("options") ?: JSONArray()
-                val list = mutableListOf<PollOptionItem>()
-                for (i in 0 until arr.length()) {
-                    val item = arr.getJSONObject(i)
-                    val votersArr = item.optJSONArray("voters") ?: JSONArray()
-                    val voters = mutableListOf<String>()
-                    for (j in 0 until votersArr.length()) {
-                        voters.add(votersArr.getString(j))
-                    }
-                    list.add(
-                        PollOptionItem(
-                            index = item.optInt("index", i),
-                            text = item.optString("text", ""),
-                            voterNames = voters
-                        )
-                    )
-                }
-                q to list
-            } catch (e: Exception) {
-                "Şifreli Anket" to emptyList()
+        fun parsePollOptions(meta: String): Pair<String, List<PollOptionItem>> = try {
+            val obj = JSONObject(meta)
+            val arr = obj.optJSONArray("options") ?: JSONArray()
+            obj.optString("question", "Anket") to (0 until arr.length()).map { i ->
+                val item = arr.getJSONObject(i)
+                val votersArr = item.optJSONArray("voters") ?: JSONArray()
+                PollOptionItem(
+                    index = item.optInt("index", i),
+                    text = item.optString("text"),
+                    voterNames = (0 until votersArr.length()).map { votersArr.getString(it) }
+                )
             }
+        } catch (_: Exception) {
+            "Anket" to emptyList()
         }
     }
 }

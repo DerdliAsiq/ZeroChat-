@@ -12,10 +12,11 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import kotlinx.coroutines.flow.Flow
 
-@Entity(tableName = "locked_rooms")
+/** Rooms moved into the PIN-protected secret vault, per account. */
+@Entity(tableName = "locked_rooms", primaryKeys = ["ownerUid", "roomId"])
 data class LockedRoomEntity(
-    @PrimaryKey val roomId: String,
-    val isSecretVault: Boolean = true,
+    val ownerUid: String,
+    val roomId: String,
     val lockedAtMillis: Long = System.currentTimeMillis()
 )
 
@@ -26,58 +27,72 @@ data class PinnedRoomEntity(
     val pinnedAtMillis: Long = System.currentTimeMillis()
 )
 
-@Entity(tableName = "verified_peers", primaryKeys = ["ownerUid", "peerUsername"])
+/** Conversations removed from this user's list only ("delete chat" for direct messages). */
+@Entity(tableName = "hidden_rooms", primaryKeys = ["ownerUid", "roomId"])
+data class HiddenRoomEntity(
+    val ownerUid: String,
+    val roomId: String,
+    /** Messages older than this stay hidden if the conversation comes back. */
+    val hiddenAtMillis: Long = System.currentTimeMillis()
+)
+
+/** A peer whose identity keys were verified (QR / safety number) by this user. */
+@Entity(tableName = "verified_peers", primaryKeys = ["ownerUid", "peerUid"])
 data class VerifiedPeerEntity(
     val ownerUid: String,
+    val peerUid: String,
     val peerUsername: String,
-    val verifiedPublicKey: String,
-    val verifiedSafetyFingerprint: String,
+    /** CryptoEngine.identityKeyId of the keys that were verified. */
+    val verifiedKeyId: String,
     val verifiedAtMillis: Long = System.currentTimeMillis()
 )
 
+/** A message to send later. [payloadJson] is the full message payload, encrypted on send. */
 @Entity(tableName = "scheduled_envelopes")
 data class ScheduledEnvelopeEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0L,
     val ownerUid: String,
     val roomId: String,
     val roomTitle: String,
+    val envelopeId: String,
+    val payloadJson: String,
     val plaintext: String,
     val ttlSeconds: Long = 0L,
     val scheduledAtMillis: Long,
     val createdAtMillis: Long = System.currentTimeMillis()
 )
 
-val ScheduledEnvelopeEntity.decryptedPreview: String
-    get() = plaintext
-
+/** Local vault settings. PINs are stored as salted PBKDF2 hashes; there are no defaults. */
 @Entity(tableName = "vault_security_config")
 data class VaultSecurityConfigEntity(
     @PrimaryKey val ownerUid: String,
-    val normalPinHash: String,
-    val panicPinHash: String,
-    val autoBurnDefaultSeconds: Long = 0L,
+    val pinSalt: String = "",
+    val normalPinHash: String = "",
+    val panicPinHash: String = "",
     val screenShieldEnabled: Boolean = false,
     val biometricUnlockEnabled: Boolean = true,
     val autoLockOnBackground: Boolean = true,
+    val failedAttempts: Int = 0,
+    val lockoutUntilMillis: Long = 0L,
     val updatedAtMillis: Long = System.currentTimeMillis()
-)
+) {
+    val hasPins: Boolean get() = pinSalt.isNotBlank() && normalPinHash.isNotBlank() && panicPinHash.isNotBlank()
+}
 
+/** A message that could not be sent yet. [envelopeId] makes retries idempotent. */
 @Entity(tableName = "offline_outbox_queue")
 data class PendingOutboxEntity(
     @PrimaryKey(autoGenerate = true) val localId: Long = 0L,
     val ownerUid: String,
     val roomId: String,
     val roomTitle: String,
-    val roomKeyHint: String,
-    val participantUidsCsv: String,
-    val senderUsername: String,
-    val plaintext: String,
-    val messageType: String,
-    val encryptedMeta: String,
+    val envelopeId: String,
+    val payloadJson: String,
     val ttlSeconds: Long,
     val createdAtMillis: Long = System.currentTimeMillis()
 )
 
+/** Decrypted copy of a received message (for search, starring and backups). */
 @Entity(tableName = "cached_vault_messages")
 data class CachedVaultMessageEntity(
     @PrimaryKey val messageId: String,
@@ -86,23 +101,23 @@ data class CachedVaultMessageEntity(
     val roomTitle: String,
     val senderUsername: String,
     val decryptedText: String,
-    val ciphertext: String,
-    val iv: String,
     val messageType: String,
     val isStarred: Boolean = false,
-    val createdAtMillis: Long
+    val createdAtMillis: Long,
+    /** 0 = never; self-destructing messages are removed from the cache when they expire. */
+    val expireAtMillis: Long = 0L
 )
 
 @Dao
 interface LocalVaultDao {
-    @Query("SELECT * FROM locked_rooms")
-    fun observeLockedRooms(): Flow<List<LockedRoomEntity>>
+    @Query("SELECT * FROM locked_rooms WHERE ownerUid = :uid")
+    fun observeLockedRooms(uid: String): Flow<List<LockedRoomEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun setRoomLocked(entity: LockedRoomEntity)
 
-    @Query("DELETE FROM locked_rooms WHERE roomId = :roomId")
-    suspend fun unlockRoom(roomId: String)
+    @Query("DELETE FROM locked_rooms WHERE ownerUid = :uid AND roomId = :roomId")
+    suspend fun unlockRoom(uid: String, roomId: String)
 
     @Query("SELECT * FROM pinned_rooms WHERE ownerUid = :uid")
     fun observePinnedRooms(uid: String): Flow<List<PinnedRoomEntity>>
@@ -113,20 +128,32 @@ interface LocalVaultDao {
     @Query("DELETE FROM pinned_rooms WHERE ownerUid = :uid AND roomId = :roomId")
     suspend fun unpinRoom(uid: String, roomId: String)
 
+    @Query("SELECT * FROM hidden_rooms WHERE ownerUid = :uid")
+    fun observeHiddenRooms(uid: String): Flow<List<HiddenRoomEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun hideRoom(entity: HiddenRoomEntity)
+
+    @Query("DELETE FROM hidden_rooms WHERE ownerUid = :uid AND roomId = :roomId")
+    suspend fun unhideRoom(uid: String, roomId: String)
+
     @Query("SELECT * FROM verified_peers WHERE ownerUid = :uid")
     fun observeVerifiedPeers(uid: String): Flow<List<VerifiedPeerEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun saveVerifiedPeer(entity: VerifiedPeerEntity)
 
-    @Query("DELETE FROM verified_peers WHERE ownerUid = :uid AND peerUsername = :peerUsername")
-    suspend fun deleteVerifiedPeer(uid: String, peerUsername: String)
+    @Query("DELETE FROM verified_peers WHERE ownerUid = :uid AND peerUid = :peerUid")
+    suspend fun deleteVerifiedPeer(uid: String, peerUid: String)
 
     @Query("SELECT * FROM scheduled_envelopes WHERE ownerUid = :uid ORDER BY scheduledAtMillis ASC")
     fun observeScheduledEnvelopes(uid: String): Flow<List<ScheduledEnvelopeEntity>>
 
     @Query("SELECT * FROM scheduled_envelopes WHERE ownerUid = :uid AND scheduledAtMillis <= :nowMillis ORDER BY scheduledAtMillis ASC")
     suspend fun getDueScheduledEnvelopes(uid: String, nowMillis: Long): List<ScheduledEnvelopeEntity>
+
+    @Query("SELECT MIN(scheduledAtMillis) FROM scheduled_envelopes WHERE ownerUid = :uid")
+    suspend fun nextScheduledAt(uid: String): Long?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertScheduledEnvelope(entity: ScheduledEnvelopeEntity)
@@ -161,30 +188,52 @@ interface LocalVaultDao {
     @Query("SELECT * FROM cached_vault_messages WHERE ownerUid = :uid ORDER BY createdAtMillis DESC")
     fun observeCachedMessages(uid: String): Flow<List<CachedVaultMessageEntity>>
 
+    @Query("SELECT COUNT(*) FROM cached_vault_messages WHERE ownerUid = :uid")
+    fun observeCachedMessageCount(uid: String): Flow<Int>
+
     @Query("SELECT * FROM cached_vault_messages WHERE ownerUid = :uid AND isStarred = 1 ORDER BY createdAtMillis DESC")
     fun observeStarredMessages(uid: String): Flow<List<CachedVaultMessageEntity>>
 
-    @Query("UPDATE cached_vault_messages SET isStarred = :isStarred WHERE messageId = :messageId")
-    suspend fun updateMessageStarred(messageId: String, isStarred: Boolean)
+    @Query("SELECT messageId FROM cached_vault_messages WHERE ownerUid = :uid AND roomId = :roomId AND isStarred = 1")
+    fun observeStarredIdsInRoom(uid: String, roomId: String): Flow<List<String>>
+
+    @Query("UPDATE cached_vault_messages SET isStarred = :isStarred WHERE ownerUid = :uid AND messageId = :messageId")
+    suspend fun updateMessageStarred(uid: String, messageId: String, isStarred: Boolean)
 
     @Query("DELETE FROM cached_vault_messages WHERE ownerUid = :uid AND roomId = :roomId")
     suspend fun deleteCachedMessagesForRoom(uid: String, roomId: String)
 
-    @Query("SELECT * FROM cached_vault_messages WHERE ownerUid = :uid ORDER BY createdAtMillis DESC")
-    suspend fun getAllCachedMessages(uid: String): List<CachedVaultMessageEntity>
+    @Query("DELETE FROM cached_vault_messages WHERE messageId IN (:messageIds)")
+    suspend fun deleteCachedMessages(messageIds: List<String>)
+
+    @Query("DELETE FROM cached_vault_messages WHERE expireAtMillis > 0 AND expireAtMillis <= :nowMillis")
+    suspend fun deleteExpiredCachedMessages(nowMillis: Long)
+
+    @Query("SELECT * FROM cached_vault_messages WHERE ownerUid = :uid AND expireAtMillis = 0 ORDER BY createdAtMillis DESC")
+    suspend fun getBackupableMessages(uid: String): List<CachedVaultMessageEntity>
+
+    @Query("DELETE FROM cached_vault_messages WHERE ownerUid = :uid")
+    suspend fun clearCachedMessages(uid: String)
+
+    @Query("DELETE FROM offline_outbox_queue WHERE ownerUid = :uid")
+    suspend fun clearOutbox(uid: String)
+
+    @Query("DELETE FROM scheduled_envelopes WHERE ownerUid = :uid")
+    suspend fun clearScheduled(uid: String)
 }
 
 @Database(
     entities = [
         LockedRoomEntity::class,
         PinnedRoomEntity::class,
+        HiddenRoomEntity::class,
         VerifiedPeerEntity::class,
         ScheduledEnvelopeEntity::class,
         VaultSecurityConfigEntity::class,
         PendingOutboxEntity::class,
         CachedVaultMessageEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class LocalVaultDatabase : RoomDatabase() {

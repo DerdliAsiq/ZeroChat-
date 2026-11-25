@@ -140,7 +140,7 @@ fun ChatListAndDiscoveryScreen(
         allRooms.filter { it.isPendingRequest }
     }
     val incomingRequestRooms = remember(allRooms, myProfile?.username) {
-        allRooms.filter { it.isIncomingRequestFor(myProfile?.username) }
+        allRooms.filter { it.isIncomingRequestFor(myProfile?.userId) }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -504,20 +504,19 @@ fun ChatListAndDiscoveryScreen(
                         }
 
                         // Always show instant match / connection card when user searches a @username!
-                        if (cleanSearchedHandle.isNotBlank()) {
+                        if (cleanSearchedHandle.isNotBlank() && exactMatchedPeer == null && cleanSearchedHandle.length >= 2) {
                             item {
-                                val (genPub, genFp) = remember(cleanSearchedHandle) {
-                                    CryptoEngine.generateIdentityMaterial("peer_$cleanSearchedHandle", cleanSearchedHandle)
-                                }
-                                val targetPeer = exactMatchedPeer ?: UserProfile(
-                                    id = "peer_$cleanSearchedHandle",
-                                    userId = "peer_" + CryptoEngine.sha256Hex("ZEROCHAT_PEER::$cleanSearchedHandle").take(18),
-                                    username = cleanSearchedHandle,
-                                    displayName = "@$cleanSearchedHandle",
-                                    bio = "ZeroChat Kullanıcısı",
-                                    publicKey = genPub,
-                                    safetyFingerprint = genFp
+                                Text(
+                                    text = "@$cleanSearchedHandle ile eşleşen kullanıcı bulunamadı. Kullanıcı adını tam yazın veya QR kodu tarayın.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(vertical = 6.dp)
                                 )
+                            }
+                        }
+                        if (exactMatchedPeer != null) {
+                            item {
+                                val targetPeer = exactMatchedPeer
                                 val existingRoomForTarget = allRooms.firstOrNull { room ->
                                     !room.isGroup &&
                                         (room.participantUids.contains(targetPeer.userId) ||
@@ -539,21 +538,13 @@ fun ChatListAndDiscoveryScreen(
                                         ) {
                                             Column(modifier = Modifier.weight(1f)) {
                                                 Text(
-                                                    text = if (exactMatchedPeer != null) {
-                                                        "✅ Kullanıcı Bulundu: @${targetPeer.username}"
-                                                    } else {
-                                                        "🔍 Kullanıcı: @${targetPeer.username}"
-                                                    },
+                                                    text = "✅ Kullanıcı Bulundu: @${targetPeer.username}",
                                                     style = MaterialTheme.typography.titleSmall,
                                                     fontWeight = FontWeight.Bold,
                                                     color = NeonCyberGreen
                                                 )
                                                 Text(
-                                                    text = if (exactMatchedPeer != null) {
-                                                        targetPeer.displayName
-                                                    } else {
-                                                        "Bu kullanıcıyla doğrudan güvenli sohbet başlatabilirsiniz."
-                                                    },
+                                                    text = targetPeer.displayName,
                                                     style = MaterialTheme.typography.bodySmall,
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                                 )
@@ -623,7 +614,7 @@ fun ChatListAndDiscoveryScreen(
                                         val connectionStatus = when {
                                             existingRoom == null || existingRoom.isRejectedRequest -> "NONE"
                                             existingRoom.isApprovedConnection -> "APPROVED"
-                                            existingRoom.isIncomingRequestFor(myProfile?.username) -> "INCOMING_PENDING"
+                                            existingRoom.isIncomingRequestFor(myProfile?.userId) -> "INCOMING_PENDING"
                                             else -> "OUTGOING_PENDING"
                                         }
                                         DirectoryPeerChipCard(
@@ -714,6 +705,7 @@ fun ChatListAndDiscoveryScreen(
                                 EncryptedRoomCard(
                                     room = room,
                                     myUsername = myProfile?.username,
+                                    myUid = myProfile?.userId,
                                     isVaultLocked = isLocked,
                                     isPinned = isPinned,
                                     isPeerVerified = isVerified,
@@ -913,11 +905,7 @@ private fun IncomingRequestsInboxSection(
             Spacer(modifier = Modifier.height(10.dp))
 
             incomingRooms.forEach { reqRoom ->
-                val notePreview = remember(reqRoom.lastCipherPreview, reqRoom.roomKeyHint) {
-                    CryptoEngine.decryptPreviewPacket(reqRoom.lastCipherPreview, reqRoom.roomKeyHint)
-                        .takeIf { it != "🔒 Şifreli mesaj" }
-                        ?: "🤝 @${reqRoom.requesterUsername} sizinle sohbet başlatmak istiyor."
-                }
+                val notePreview = reqRoom.previewText.ifBlank { "🤝 @${reqRoom.requesterUsername} sizinle sohbet başlatmak istiyor." }
                 Surface(
                     shape = RoundedCornerShape(12.dp),
                     color = ObsidianBlack,
@@ -1235,6 +1223,7 @@ private fun DirectoryPeerChipCard(
 private fun EncryptedRoomCard(
     room: ChatRoom,
     myUsername: String? = null,
+    myUid: String? = null,
     isVaultLocked: Boolean,
     isPinned: Boolean = false,
     isPeerVerified: Boolean = false,
@@ -1246,17 +1235,15 @@ private fun EncryptedRoomCard(
     onToggleLock: () -> Unit,
     onDelete: () -> Unit = {}
 ) {
-    val isIncomingReq = room.isIncomingRequestFor(myUsername)
-    val isOutgoingReq = room.isOutgoingRequestFrom(myUsername)
+    val isIncomingReq = room.isIncomingRequestFor(myUid)
+    val isOutgoingReq = room.isOutgoingRequestFrom(myUid)
     val displayTitle = remember(room.title, room.participantNames, room.isGroup, myUsername) {
         room.displayTitleFor(myUsername)
     }
 
-    val decryptedPreview = remember(room.lastCipherPreview, room.roomKeyHint) {
-        CryptoEngine.decryptPreviewPacket(room.lastCipherPreview, room.roomKeyHint)
-    }
-    val timeText = remember(room.updatedAt, room.createdAt) {
-        val date = (room.updatedAt ?: room.createdAt)?.toDate() ?: Date()
+    val decryptedPreview = room.previewText
+    val timeText = remember(room.activityMillis) {
+        val date = Date(room.activityMillis.takeIf { it > 0L } ?: System.currentTimeMillis())
         SimpleDateFormat("HH:mm", Locale.getDefault()).format(date)
     }
 

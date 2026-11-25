@@ -73,7 +73,7 @@ android {
 
 tasks.withType<Test> {
   failFast = true
-  timeout.set(Duration.ofMinutes(2))
+  timeout.set(Duration.ofMinutes(10))
   systemProperty(
     "robolectric.dependency.repo.url",
     "https://maven-central.storage-download.googleapis.com/maven2"

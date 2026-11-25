@@ -131,6 +131,7 @@ import com.example.data.model.ChatRoom
 import com.example.data.model.DecryptedMessageItem
 import com.example.data.model.UserProfile
 import com.example.ui.ZeroChatViewModel
+import com.example.ui.SafetyInfo
 import com.example.ui.components.RoomSafetyAndCipherInspectorDialog
 import com.example.ui.theme.AmberTimerWarning
 import com.example.ui.theme.BurnCoralRed
@@ -161,6 +162,7 @@ fun ChatConversationScreen(
     directoryPeers: List<UserProfile> = emptyList(),
     isRoomPeerVerified: Boolean = false,
     hasRoomKeyChangedWarning: Boolean = false,
+    safetyInfo: SafetyInfo? = null,
     scheduledEnvelopes: List<ScheduledEnvelopeEntity> = emptyList(),
     inChatSearchQuery: String = "",
     onInChatSearchQueryChange: (String) -> Unit = {},
@@ -185,7 +187,7 @@ fun ChatConversationScreen(
     onBack: () -> Unit,
     onSendText: (String, Long?, Boolean, Boolean) -> Unit,
     onSendVoiceNote: (Int, String, String, Long?) -> Unit,
-    onSendImageAttachment: (String, String, Long?, Boolean, String) -> Unit,
+    onSendImageAttachment: (String, String, Long?, Boolean) -> Unit,
     onSendFileAttachment: (String, Int, String, String, Long?) -> Unit = { _, _, _, _, _ -> },
     onSendLocation: (Double, Double, String, Long?) -> Unit,
     onSendPoll: (String, List<String>, Long?) -> Unit,
@@ -212,7 +214,6 @@ fun ChatConversationScreen(
     var showTtlSelector by remember { mutableStateOf(false) }
     var showInChatSearch by remember { mutableStateOf(false) }
     var showPollCreator by remember { mutableStateOf(false) }
-    var showStegoComposer by remember { mutableStateOf(false) }
     var showScheduleDialog by remember { mutableStateOf(false) }
     var showGroupAndKeyManager by remember { mutableStateOf(false) }
     var forwardingMessage by remember { mutableStateOf<DecryptedMessageItem?>(null) }
@@ -286,10 +287,9 @@ fun ChatConversationScreen(
             val encodedDataUri = encodeUriToEncryptedDataUri(context, uri) ?: uri.toString()
             onSendImageAttachment(
                 encodedDataUri,
-                if (isViewOnceSelected) "🔥👁️ 1 Kez Görüntülenebilir Şifreli Görsel" else "📷 Şifreli Görsel Paylaşımı",
+                "",
                 selectedTtlOverride,
-                isViewOnceSelected,
-                ""
+                isViewOnceSelected
             )
             isViewOnceSelected = false
         }
@@ -772,7 +772,6 @@ fun ChatConversationScreen(
                 val isMine = msg.senderId == currentUserId
                 EncryptedMessageBubble(
                     message = msg,
-                    roomKeyHint = room.roomKeyHint,
                     isMine = isMine,
                     isPlayingAudio = playingMessageId == msg.id,
                     onPlayVoiceNote = { speed ->
@@ -978,7 +977,7 @@ fun ChatConversationScreen(
         }
 
         if (!room.isApprovedConnection) {
-            val isIncoming = room.isIncomingRequestFor(myUsername)
+            val isIncoming = room.isIncomingRequestFor(currentUserId)
             Surface(
                 color = MaterialTheme.colorScheme.surface,
                 border = BorderStroke(
@@ -1003,24 +1002,24 @@ fun ChatConversationScreen(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = if (isIncoming) {
-                                "📨 @${room.requesterUsername} iletişim isteği gönderdi"
-                            } else {
-                                "🤝 Şifreli tünel hazır (Mesaj yazarak veya onaylayarak başlatın)"
+                            text = when {
+                                room.isRejectedRequest -> "⛔ Sohbet isteği reddedildi"
+                                isIncoming -> "📨 @${room.requesterUsername} size sohbet isteği gönderdi. Kabul edene kadar yanıt veremezsiniz."
+                                else -> "⏳ İstek gönderildi, kabul edilmesi bekleniyor"
                             },
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurface
                         )
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (!room.isRejectedRequest) Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         OutlinedButton(
                             onClick = onRejectOrCancelConnectionRequest,
                             border = BorderStroke(1.dp, BurnCoralRed),
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                         ) {
-                            Text("Reddet", style = MaterialTheme.typography.labelSmall, color = BurnCoralRed)
+                            Text(if (isIncoming) "Reddet" else "Geri Çek", style = MaterialTheme.typography.labelSmall, color = BurnCoralRed)
                         }
-                        Button(
+                        if (isIncoming) Button(
                             onClick = onApproveConnectionRequest,
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = NeonCyberGreen,
@@ -1144,15 +1143,6 @@ fun ChatConversationScreen(
                                 photoPickerLauncher.launch(
                                     PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                                 )
-                            }
-                        )
-                        AttachmentToolButton(
-                            icon = Icons.Default.EnhancedEncryption,
-                            label = "Stego Görsel",
-                            tint = CyberCyan,
-                            onClick = {
-                                showAttachmentTools = false
-                                showStegoComposer = true
                             }
                         )
                         AttachmentToolButton(
@@ -1339,10 +1329,9 @@ fun ChatConversationScreen(
                 showCameraPhotoCapture = false
                 onSendImageAttachment(
                     dataUri,
-                    if (isViewOnceSelected) "🔥👁️ 1 Kez Görüntülenebilir Fotoğraf" else "📸 Fotoğraf",
+                    "",
                     selectedTtlOverride,
-                    isViewOnceSelected,
-                    ""
+                    isViewOnceSelected
                 )
                 isViewOnceSelected = false
             },
@@ -1353,7 +1342,7 @@ fun ChatConversationScreen(
     if (showRoomInspector) {
         RoomSafetyAndCipherInspectorDialog(
             room = room,
-            myUsername = myUsername,
+            safetyInfo = safetyInfo,
             inspectedMessage = inspectedMessage,
             isPeerVerified = isRoomPeerVerified,
             hasKeyChangedWarning = hasRoomKeyChangedWarning,
@@ -1382,23 +1371,6 @@ fun ChatConversationScreen(
             onCreatePoll = { q, opts ->
                 onSendPoll(q, opts, selectedTtlOverride)
                 showPollCreator = false
-            }
-        )
-    }
-
-    if (showStegoComposer) {
-        SteganographyComposerDialog(
-            onDismiss = { showStegoComposer = false },
-            onSendStegoImage = { carrierUri, visibleCaption, secretMessage ->
-                onSendImageAttachment(
-                    carrierUri,
-                    visibleCaption,
-                    selectedTtlOverride,
-                    isViewOnceSelected,
-                    secretMessage
-                )
-                isViewOnceSelected = false
-                showStegoComposer = false
             }
         )
     }
@@ -1487,7 +1459,6 @@ private fun SessionSecurityNoticeBanner(
 @Composable
 private fun EncryptedMessageBubble(
     message: DecryptedMessageItem,
-    roomKeyHint: String,
     isMine: Boolean,
     isPlayingAudio: Boolean,
     onPlayVoiceNote: (Float) -> Unit,
@@ -1507,7 +1478,6 @@ private fun EncryptedMessageBubble(
 ) {
     var showReactionBar by remember { mutableStateOf(false) }
     var isSpoilerRevealed by remember(message.id) { mutableStateOf(false) }
-    var extractedStegoPlaintext by remember(message.id) { mutableStateOf<String?>(null) }
     var voicePlaybackSpeed by remember(message.id) { mutableFloatStateOf(1.0f) }
 
     val timeText = remember(message.createdAtMillis) {
@@ -1991,53 +1961,6 @@ private fun EncryptedMessageBubble(
                                 color = MaterialTheme.colorScheme.onSurface
                             )
 
-                            // Steganography hidden payload detector
-                            if (message.stegoPayload.isNotBlank()) {
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Surface(
-                                    shape = RoundedCornerShape(10.dp),
-                                    color = ObsidianBlack,
-                                    border = BorderStroke(1.dp, CyberCyan),
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable {
-                                            extractedStegoPlaintext = if (extractedStegoPlaintext == null) {
-                                                CryptoEngine.extractStegoPayload(
-                                                    stegoPacket = message.stegoPayload,
-                                                    roomKeyHint = roomKeyHint
-                                                )
-                                            } else {
-                                                null
-                                            }
-                                        }
-                                ) {
-                                    Column(modifier = Modifier.padding(10.dp)) {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Icon(
-                                                imageVector = Icons.Default.EnhancedEncryption,
-                                                contentDescription = null,
-                                                tint = CyberCyan,
-                                                modifier = Modifier.size(16.dp)
-                                            )
-                                            Spacer(modifier = Modifier.width(6.dp))
-                                            Text(
-                                                text = "🧬 Steganografik Gizli Katman Algılandı",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                fontWeight = FontWeight.Bold,
-                                                color = CyberCyan
-                                            )
-                                        }
-                                        Spacer(modifier = Modifier.height(4.dp))
-                                        Text(
-                                            text = extractedStegoPlaintext
-                                                ?: "Görsel içine gömülü AES-256-GCM mesajı çözmek için dokunun.",
-                                            fontFamily = if (extractedStegoPlaintext != null) JetBrainsMonoFontFamily else null,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = if (extractedStegoPlaintext != null) NeonCyberGreen else MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                }
-                            }
                         }
 
                         else -> {
@@ -2448,111 +2371,6 @@ private fun ViewOnceRevealDialog(
                     Icon(imageVector = Icons.Default.DeleteForever, contentDescription = null)
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("Kapat ve Zarfı Şimdi İmha Et", fontWeight = FontWeight.Bold)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun SteganographyComposerDialog(
-    onDismiss: () -> Unit,
-    onSendStegoImage: (String, String, String) -> Unit
-) {
-    val context = LocalContext.current
-    var visibleCaption by remember { mutableStateOf("📷 Siber Ağ Topolojisi Görseli") }
-    var secretMessage by remember { mutableStateOf("") }
-    var pickedUri by remember { mutableStateOf("") }
-
-    val stegoPhotoPicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia()
-    ) { uri ->
-        if (uri != null) {
-            pickedUri = encodeUriToEncryptedDataUri(context, uri) ?: uri.toString()
-        }
-    }
-
-    Dialog(onDismissRequest = onDismiss) {
-        Card(
-            shape = RoundedCornerShape(22.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            border = BorderStroke(1.dp, CyberCyan)
-        ) {
-            Column(modifier = Modifier.padding(20.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = Icons.Default.EnhancedEncryption,
-                        contentDescription = null,
-                        tint = CyberCyan
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "🧬 Steganografi (Görsele Şifre Göm)",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = "Görsel zarfın içine sadece alıcının STEGO_LAYER alt anahtarıyla çözebileceği gizli bir metin gömün.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.height(10.dp))
-                OutlinedButton(
-                    onClick = {
-                        stegoPhotoPicker.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                        )
-                    },
-                    border = BorderStroke(1.dp, CyberCyan),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Icon(imageVector = Icons.Default.Image, contentDescription = null, tint = CyberCyan)
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = if (pickedUri.isNotBlank()) "Görsel Seçildi ✓" else "Galeriden Taşıyıcı Görsel Seç (Opsiyonel)",
-                        color = CyberCyan
-                    )
-                }
-                Spacer(modifier = Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = visibleCaption,
-                    onValueChange = { visibleCaption = it },
-                    label = { Text("Herkesin Göreceği Normal Başlık") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = secretMessage,
-                    onValueChange = { secretMessage = it },
-                    label = { Text("Görsel İçine Gömülecek Gizli Mesaj") },
-                    maxLines = 3,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(modifier = Modifier.height(14.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End
-                ) {
-                    OutlinedButton(onClick = onDismiss) {
-                        Text("İptal")
-                    }
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Button(
-                        onClick = {
-                            if (secretMessage.isNotBlank()) {
-                                onSendStegoImage(pickedUri, visibleCaption, secretMessage)
-                            }
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = NeonCyberGreen,
-                            contentColor = Color(0xFF002110)
-                        )
-                    ) {
-                        Text("Göm & Gönder", fontWeight = FontWeight.Bold)
-                    }
                 }
             }
         }

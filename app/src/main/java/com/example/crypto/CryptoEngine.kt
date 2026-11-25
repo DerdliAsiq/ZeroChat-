@@ -1,401 +1,291 @@
 package com.example.crypto
 
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
 import android.util.Base64
 import java.nio.charset.StandardCharsets
 import java.security.KeyFactory
+import java.security.KeyPair
 import java.security.KeyPairGenerator
-import java.security.KeyStore
 import java.security.MessageDigest
+import java.security.PrivateKey
 import java.security.PublicKey
 import java.security.SecureRandom
+import java.security.Signature
 import java.security.spec.ECGenParameterSpec
+import java.security.spec.PKCS8EncodedKeySpec
 import java.security.spec.X509EncodedKeySpec
 import javax.crypto.Cipher
 import javax.crypto.KeyAgreement
+import javax.crypto.Mac
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 
-data class EncryptedPayload(
-    val ciphertext: String,
-    val iv: String,
-    val signatureHash: String,
-    val ratchetStep: Int = 0
-)
+/** AES-GCM output: base64 IV and base64 ciphertext (with the 128-bit tag appended). */
+data class SealedBox(val iv: String, val ciphertext: String)
 
-data class HardwareKeyStatus(
-    val algorithm: String,
-    val isHardwareBacked: Boolean,
-    val publicKeyBase64: String,
-    val safetyFingerprint: String
-)
-
+/**
+ * Cryptographic primitives and the ZeroChat V2 end-to-end protocol helpers.
+ *
+ * Protocol summary (see CLAUDE.md for the full model):
+ * - Every user has two P-256 identity key pairs: one for ECDH (key wrapping) and one for ECDSA
+ *   (message signatures). Only the public halves are published in `users/{uid}`.
+ * - Every room has random 256-bit keys, one per `keyVersion`. Each version is stored in
+ *   `rooms/{roomId}/keys/{version}` wrapped separately for every participant with ECIES
+ *   (ephemeral P-256 ECDH + HKDF-SHA256 + AES-256-GCM). The server never sees a usable key.
+ * - Message payloads are AES-256-GCM encrypted with the room key and bound to their routing
+ *   metadata through AAD, then signed with the sender's ECDSA key.
+ */
 object CryptoEngine {
     private const val AES_MODE = "AES/GCM/NoPadding"
     private const val GCM_TAG_LENGTH_BITS = 128
     private const val GCM_IV_LENGTH_BYTES = 12
-    private const val KEYSTORE_PROVIDER = "AndroidKeyStore"
-    private val secureRandom = SecureRandom()
+    private const val EC_CURVE = "secp256r1"
 
-    // Fallback in-memory EC keypair for unit tests or devices without AndroidKeyStore ECDH
-    private var softwareEcKeyPair: java.security.KeyPair? = null
+    const val PROTOCOL_VERSION = 2
+    const val PIN_PBKDF2_ITERATIONS = 120_000
+    const val BACKUP_PBKDF2_ITERATIONS = 310_000
+    const val MIN_BACKUP_PASSWORD_LENGTH = 10
+    const val MIN_PIN_LENGTH = 6
+
+    private val secureRandom = SecureRandom()
 
     private val verificationEmojisPool = listOf(
         "🛡️", "⚡", "🔑", "🛰️", "🧬", "🔮", "🪐", "🔒",
         "🐉", "🦅", "💎", "🔥", "🌊", "🍀", "⚓", "🎯"
     )
 
-    /**
-     * Generates or loads a real EC P-256 (secp256r1) keypair using Android Keystore (with software EC fallback)
-     * and returns the X.509 Base64 public key + 60-digit Safety Fingerprint.
-     */
-    fun getOrCreateHardwareIdentity(userId: String, username: String): HardwareKeyStatus {
-        val alias = "zerochat_ecdh_$userId"
-        return try {
-            val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-            if (!keyStore.containsAlias(alias)) {
-                val kpg = KeyPairGenerator.getInstance(
-                    KeyProperties.KEY_ALGORITHM_EC,
-                    KEYSTORE_PROVIDER
-                )
-                val spec = KeyGenParameterSpec.Builder(
-                    alias,
-                    KeyProperties.PURPOSE_AGREE_KEY or KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
-                )
-                    .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
-                    .setDigests(KeyProperties.DIGEST_SHA256)
-                    .build()
-                kpg.initialize(spec)
-                kpg.generateKeyPair()
-            }
-            val cert = keyStore.getCertificate(alias)
-            val pubKeyBytes = cert.publicKey.encoded
-            val pubKeyB64 = "ECDH-P256-" + Base64.encodeToString(pubKeyBytes, Base64.NO_WRAP)
-            val (_, safetyDigits) = generateIdentityMaterial(userId, "$username::$pubKeyB64")
-            HardwareKeyStatus(
-                algorithm = "ECDH P-256 (Android Keystore)",
-                isHardwareBacked = true,
-                publicKeyBase64 = pubKeyB64,
-                safetyFingerprint = safetyDigits
-            )
-        } catch (e: Exception) {
-            // Software EC P-256 fallback (e.g., Robolectric JVM or legacy Keystore)
-            try {
-                val kp = softwareEcKeyPair ?: KeyPairGenerator.getInstance("EC").apply {
-                    initialize(ECGenParameterSpec("secp256r1"), secureRandom)
-                }.generateKeyPair().also { softwareEcKeyPair = it }
+    // ---------------------------------------------------------------- encoding & hashing
 
-                val pubKeyB64 = "ECDH-P256-" + Base64.encodeToString(kp.public.encoded, Base64.NO_WRAP)
-                val (_, safetyDigits) = generateIdentityMaterial(userId, "$username::$pubKeyB64")
-                HardwareKeyStatus(
-                    algorithm = "ECDH P-256 (JCA Curve secp256r1)",
-                    isHardwareBacked = false,
-                    publicKeyBase64 = pubKeyB64,
-                    safetyFingerprint = safetyDigits
-                )
-            } catch (ex: Exception) {
-                val (pubKeyB64, safetyDigits) = generateIdentityMaterial(userId, username)
-                HardwareKeyStatus(
-                    algorithm = "SHA-256 + AES-256-GCM",
-                    isHardwareBacked = false,
-                    publicKeyBase64 = pubKeyB64,
-                    safetyFingerprint = safetyDigits
-                )
-            }
+    fun b64(bytes: ByteArray): String = Base64.encodeToString(bytes, Base64.NO_WRAP)
+
+    fun unb64(value: String): ByteArray = Base64.decode(value, Base64.NO_WRAP)
+
+    fun randomBytes(size: Int): ByteArray = ByteArray(size).also { secureRandom.nextBytes(it) }
+
+    fun sha256(bytes: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(bytes)
+
+    fun sha256Hex(input: String): String = sha256(input.utf8()).toHex()
+
+    fun String.utf8(): ByteArray = toByteArray(StandardCharsets.UTF_8)
+
+    fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
+
+    /** HKDF-SHA256 (RFC 5869). */
+    fun hkdf(ikm: ByteArray, salt: ByteArray, info: ByteArray, length: Int = 32): ByteArray {
+        val extractMac = Mac.getInstance("HmacSHA256")
+        extractMac.init(SecretKeySpec(if (salt.isEmpty()) ByteArray(32) else salt, "HmacSHA256"))
+        val prk = extractMac.doFinal(ikm)
+
+        val expandMac = Mac.getInstance("HmacSHA256")
+        expandMac.init(SecretKeySpec(prk, "HmacSHA256"))
+        val out = ByteArray(length)
+        var previous = ByteArray(0)
+        var offset = 0
+        var counter = 1
+        while (offset < length) {
+            expandMac.update(previous)
+            expandMac.update(info)
+            expandMac.update(counter.toByte())
+            previous = expandMac.doFinal()
+            val toCopy = minOf(previous.size, length - offset)
+            System.arraycopy(previous, 0, out, offset, toCopy)
+            offset += toCopy
+            counter++
         }
+        return out
     }
 
-    /**
-     * Performs real ECDH KeyAgreement if peer has an X.509 EC public key, or falls back to deterministic SHA-256 shared secret.
-     */
-    fun deriveEcdhSharedSecretHex(userId: String, peerPublicKeyB64: String): String {
-        val rawB64 = peerPublicKeyB64.removePrefix("ECDH-P256-")
-        return try {
-            val peerBytes = Base64.decode(rawB64, Base64.NO_WRAP)
-            val keyFactory = KeyFactory.getInstance("EC")
-            val peerPubKey: PublicKey = keyFactory.generatePublic(X509EncodedKeySpec(peerBytes))
+    // ---------------------------------------------------------------- AES-256-GCM
 
-            val privateKey = try {
-                val keyStore = KeyStore.getInstance(KEYSTORE_PROVIDER).apply { load(null) }
-                keyStore.getKey("zerochat_ecdh_$userId", null)
-            } catch (e: Exception) {
-                null
-            } ?: softwareEcKeyPair?.private
-
-            if (privateKey != null) {
-                val keyAgreement = KeyAgreement.getInstance("ECDH")
-                keyAgreement.init(privateKey)
-                keyAgreement.doPhase(peerPubKey, true)
-                val sharedSecret = keyAgreement.generateSecret()
-                sha256Bytes(Base64.encodeToString(sharedSecret, Base64.NO_WRAP))
-                    .joinToString("") { "%02x".format(it) }
-            } else {
-                sha256Hex("$userId::$peerPublicKeyB64")
-            }
-        } catch (e: Exception) {
-            sha256Hex("$userId::$peerPublicKeyB64")
-        }
-    }
-
-    /**
-     * Derives a 256-bit AES key using Forward Secrecy Hash Ratchet step.
-     * Step 0 maintains backward compatibility with existing envelopes.
-     */
-    private fun deriveRatchetedRoomKey(roomKeyHint: String, ratchetStep: Int = 0): SecretKeySpec {
-        val digest = MessageDigest.getInstance("SHA-256")
-        val seed = if (ratchetStep <= 0) {
-            "ZEROCHAT_E2EE_V1::$roomKeyHint"
-        } else {
-            "ZEROCHAT_E2EE_RATCHET_V2::$roomKeyHint::STEP_$ratchetStep"
-        }
-        val keyBytes = digest.digest(seed.toByteArray(StandardCharsets.UTF_8))
-        return SecretKeySpec(keyBytes, "AES")
-    }
-
-    /**
-     * Encrypts plaintext using real AES-256-GCM with an optional Forward Secrecy ratchet step.
-     */
-    fun encrypt(plaintext: String, roomKeyHint: String, ratchetStep: Int = 0): EncryptedPayload {
-        val ivBytes = ByteArray(GCM_IV_LENGTH_BYTES)
-        secureRandom.nextBytes(ivBytes)
-
+    fun aesGcmEncrypt(key: ByteArray, plaintext: ByteArray, aad: ByteArray? = null): SealedBox {
+        require(key.size == 32) { "AES-256 key must be 32 bytes" }
+        val iv = randomBytes(GCM_IV_LENGTH_BYTES)
         val cipher = Cipher.getInstance(AES_MODE)
-        val keySpec = deriveRatchetedRoomKey(roomKeyHint, ratchetStep)
-        val gcmSpec = GCMParameterSpec(GCM_TAG_LENGTH_BITS, ivBytes)
-        cipher.init(Cipher.ENCRYPT_MODE, keySpec, gcmSpec)
-
-        val cipherBytes = cipher.doFinal(plaintext.toByteArray(StandardCharsets.UTF_8))
-        val ciphertextB64 = Base64.encodeToString(cipherBytes, Base64.NO_WRAP)
-        val ivB64 = Base64.encodeToString(ivBytes, Base64.NO_WRAP)
-        val signature = sha256Hex("$ciphertextB64:$ivB64:$roomKeyHint:$ratchetStep").take(32)
-
-        return EncryptedPayload(
-            ciphertext = ciphertextB64,
-            iv = ivB64,
-            signatureHash = signature,
-            ratchetStep = ratchetStep
-        )
+        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
+        if (aad != null) cipher.updateAAD(aad)
+        return SealedBox(iv = b64(iv), ciphertext = b64(cipher.doFinal(plaintext)))
     }
 
-    private fun stripKeyHintPrefix(rawKeyHint: String): String {
-        return when {
-            rawKeyHint.startsWith("REQ_FROM::") || rawKeyHint.startsWith("REQ_REJECTED::") -> {
-                val parts = rawKeyHint.split("::")
-                if (parts.size >= 3) parts.drop(2).joinToString("::") else rawKeyHint
-            }
-            else -> rawKeyHint
+    /** Throws [javax.crypto.AEADBadTagException] when the key, IV, AAD or ciphertext do not match. */
+    fun aesGcmDecrypt(key: ByteArray, ivB64: String, ciphertextB64: String, aad: ByteArray? = null): ByteArray {
+        val cipher = Cipher.getInstance(AES_MODE)
+        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(GCM_TAG_LENGTH_BITS, unb64(ivB64)))
+        if (aad != null) cipher.updateAAD(aad)
+        return cipher.doFinal(unb64(ciphertextB64))
+    }
+
+    // ---------------------------------------------------------------- P-256 keys
+
+    fun generateEcKeyPair(): KeyPair = KeyPairGenerator.getInstance("EC").apply {
+        initialize(ECGenParameterSpec(EC_CURVE), secureRandom)
+    }.generateKeyPair()
+
+    fun encodePublicKey(key: PublicKey): String = b64(key.encoded)
+
+    fun decodePublicKey(b64Key: String): PublicKey =
+        KeyFactory.getInstance("EC").generatePublic(X509EncodedKeySpec(unb64(b64Key)))
+
+    fun decodePrivateKey(pkcs8: ByteArray): PrivateKey =
+        KeyFactory.getInstance("EC").generatePrivate(PKCS8EncodedKeySpec(pkcs8))
+
+    fun ecdh(privateKey: PrivateKey, peerPublicKey: PublicKey): ByteArray {
+        val agreement = KeyAgreement.getInstance("ECDH")
+        agreement.init(privateKey)
+        agreement.doPhase(peerPublicKey, true)
+        return agreement.generateSecret()
+    }
+
+    fun sign(privateKey: PrivateKey, data: ByteArray): String {
+        val signer = Signature.getInstance("SHA256withECDSA")
+        signer.initSign(privateKey)
+        signer.update(data)
+        return b64(signer.sign())
+    }
+
+    fun verify(publicKeyB64: String, data: ByteArray, signatureB64: String): Boolean = try {
+        val verifier = Signature.getInstance("SHA256withECDSA")
+        verifier.initVerify(decodePublicKey(publicKeyB64))
+        verifier.update(data)
+        verifier.verify(unb64(signatureB64))
+    } catch (_: Exception) {
+        false
+    }
+
+    // ---------------------------------------------------------------- ECIES key wrapping
+
+    /**
+     * Wraps [secret] for the holder of [recipientPublicKeyB64]. Output format:
+     * `ephemeralPublicKey.iv.ciphertext` (base64 parts). [context] is bound as AAD and HKDF info,
+     * so a wrapped key cannot be replayed into another room, version or recipient.
+     */
+    fun wrapKey(secret: ByteArray, recipientPublicKeyB64: String, context: String): String {
+        val ephemeral = generateEcKeyPair()
+        val shared = ecdh(ephemeral.private, decodePublicKey(recipientPublicKeyB64))
+        val ephPub = encodePublicKey(ephemeral.public)
+        val kek = hkdf(shared, ephPub.utf8(), "ZC_WRAP_V2|$context".utf8())
+        val box = aesGcmEncrypt(kek, secret, context.utf8())
+        return "$ephPub.${box.iv}.${box.ciphertext}"
+    }
+
+    fun unwrapKey(wrapped: String, recipientPrivateKey: PrivateKey, context: String): ByteArray {
+        val parts = wrapped.split(".")
+        require(parts.size == 3) { "Invalid wrapped key" }
+        val shared = ecdh(recipientPrivateKey, decodePublicKey(parts[0]))
+        val kek = hkdf(shared, parts[0].utf8(), "ZC_WRAP_V2|$context".utf8())
+        return aesGcmDecrypt(kek, parts[1], parts[2], context.utf8())
+    }
+
+    fun roomKeyWrapContext(roomId: String, keyVersion: Long, recipientUid: String): String =
+        "room|$roomId|$keyVersion|$recipientUid"
+
+    fun statusKeyWrapContext(statusId: String, recipientUid: String): String =
+        "status|$statusId|$recipientUid"
+
+    /** Per-call media key derived from the room key, so each call uses fresh key material. */
+    fun deriveCallKey(roomKey: ByteArray, callId: String): ByteArray =
+        hkdf(roomKey, callId.utf8(), "ZC_CALL_V2".utf8())
+
+    // ---------------------------------------------------------------- fingerprints & safety numbers
+
+    /** Short stable id of an identity, derived from both public keys. */
+    fun identityKeyId(dhPublicKeyB64: String, signingKeyB64: String): String =
+        sha256Hex("ZC_ID_V2|$dhPublicKeyB64|$signingKeyB64").take(16)
+
+    /** 60-digit fingerprint of one identity (shown on the user's own QR / profile). */
+    fun fingerprint(dhPublicKeyB64: String, signingKeyB64: String): String =
+        digitsFrom(sha256("ZC_FP_V2|$dhPublicKeyB64|$signingKeyB64".utf8()), iterations = 12)
+
+    /**
+     * Safety number for a pair of identities. Both sides compute the same value because the
+     * per-user parts are sorted. It changes whenever either user's identity keys change.
+     */
+    fun safetyNumber(
+        uidA: String, dhA: String, signA: String,
+        uidB: String, dhB: String, signB: String
+    ): String {
+        val parts = listOf("$uidA|$dhA|$signA", "$uidB|$dhB|$signB").sorted()
+        return digitsFrom(sha256("ZC_SAFETY_V2|${parts[0]}|${parts[1]}".utf8()), iterations = 12)
+    }
+
+    fun safetyEmojis(
+        uidA: String, dhA: String, signA: String,
+        uidB: String, dhB: String, signB: String
+    ): String {
+        val parts = listOf("$uidA|$dhA|$signA", "$uidB|$dhB|$signB").sorted()
+        val bytes = sha256("ZC_EMOJI_V2|${parts[0]}|${parts[1]}".utf8())
+        return (0 until 4).joinToString("  ") { idx ->
+            verificationEmojisPool[(bytes[idx].toInt() and 0xFF) % verificationEmojisPool.size]
         }
     }
 
-    /**
-     * Decrypts Base64 AES-256-GCM ciphertext back into plaintext on the device, supporting Forward Secrecy ratchet steps
-     * and seamless fallback between request-prefixed and approved room keys.
-     */
-    fun decrypt(ciphertextB64: String, ivB64: String, roomKeyHint: String, ratchetStep: Int = 0): String {
-        if (ciphertextB64.isBlank()) return ""
-        if (ivB64.isBlank()) {
-            return decryptPreviewPacket(ciphertextB64, roomKeyHint)
+    private fun digitsFrom(seed: ByteArray, iterations: Int): String {
+        val builder = StringBuilder()
+        for (i in 0 until iterations) {
+            val block = sha256(seed + byteArrayOf(i.toByte()))
+            val num = ((block[0].toInt() and 0xFF) shl 16) or
+                ((block[1].toInt() and 0xFF) shl 8) or
+                (block[2].toInt() and 0xFF)
+            if (i > 0) builder.append(if (i % 4 == 0) "\n" else " ")
+            builder.append((num % 100000).toString().padStart(5, '0'))
         }
-        val cleanHint = stripKeyHintPrefix(roomKeyHint)
-        val candidateHints = listOf(roomKeyHint, cleanHint).distinct()
-        val candidateSteps = listOf(ratchetStep, 0).distinct()
-
-        for (hint in candidateHints) {
-            for (step in candidateSteps) {
-                try {
-                    val cipherBytes = Base64.decode(ciphertextB64, Base64.NO_WRAP)
-                    val ivBytes = Base64.decode(ivB64, Base64.NO_WRAP)
-                    val cipher = Cipher.getInstance(AES_MODE)
-                    val keySpec = deriveRatchetedRoomKey(hint, step)
-                    val gcmSpec = GCMParameterSpec(GCM_TAG_LENGTH_BITS, ivBytes)
-                    cipher.init(Cipher.DECRYPT_MODE, keySpec, gcmSpec)
-                    val decryptedBytes = cipher.doFinal(cipherBytes)
-                    return String(decryptedBytes, StandardCharsets.UTF_8)
-                } catch (_: Exception) {
-                }
-            }
-        }
-        return "🔒 Şifreli mesaj"
+        return builder.toString()
     }
 
-    /**
-     * Encrypts a short preview text for chat room list cards, embedding both IV and Ciphertext
-     * so both devices can always decrypt the room's last message preview.
-     */
-    fun encryptPreviewPacket(plaintext: String, roomKeyHint: String): String {
-        val cleanHint = stripKeyHintPrefix(roomKeyHint)
-        val enc = encrypt(plaintext.take(90), cleanHint, 0)
-        return "ZCPREV_V1::${enc.iv}::${enc.ciphertext}"
+    // ---------------------------------------------------------------- PIN hashing
+
+    fun newSaltB64(): String = b64(randomBytes(16))
+
+    /** Salted PBKDF2-HMAC-SHA256 PIN hash. Returns `iterations$hashB64`. */
+    fun hashPin(pin: String, saltB64: String, iterations: Int = PIN_PBKDF2_ITERATIONS): String {
+        val hash = pbkdf2(pin, unb64(saltB64), iterations)
+        return "$iterations$${b64(hash)}"
     }
 
-    /**
-     * Decrypts a preview packet ("ZCPREV_V1::iv::ciphertext") for chat room list cards.
-     */
-    fun decryptPreviewPacket(previewPacket: String, roomKeyHint: String): String {
-        val trimmed = previewPacket.trim()
-        if (trimmed.isBlank()) return "Yeni sohbet"
-        if (trimmed.startsWith("ZCPREV_V1::")) {
-            val parts = trimmed.split("::")
-            if (parts.size >= 3) {
-                val iv = parts[1]
-                val cipher = parts[2]
-                val cleanHint = stripKeyHintPrefix(roomKeyHint)
-                val out = decrypt(cipher, iv, cleanHint, 0)
-                if (out.isNotBlank() && out != "🔒 Şifreli mesaj") {
-                    return out
-                }
-            }
+    fun verifyPin(pin: String, saltB64: String, storedHash: String): Boolean {
+        val iterations = storedHash.substringBefore('$').toIntOrNull() ?: return false
+        val candidate = hashPin(pin, saltB64, iterations)
+        return MessageDigest.isEqual(candidate.utf8(), storedHash.utf8())
+    }
+
+    private fun pbkdf2(password: String, salt: ByteArray, iterations: Int): ByteArray {
+        val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+        val spec = PBEKeySpec(password.toCharArray(), salt, iterations, 256)
+        return try {
+            factory.generateSecret(spec).encoded
+        } finally {
+            spec.clearPassword()
         }
-        return "🔒 Şifreli mesaj"
     }
 
-    /**
-     * Password-based PBKDF2 + AES-256-GCM encryption for `.zcvault` local backup export.
-     */
+    // ---------------------------------------------------------------- password-protected backups
+
+    /** `ZCVAULT_V2::iterations::salt::iv::ciphertext` (PBKDF2-HMAC-SHA256 + AES-256-GCM). */
     fun encryptBackupArchive(jsonPlaintext: String, password: String): String {
-        val salt = ByteArray(16).also { secureRandom.nextBytes(it) }
-        val iv = ByteArray(GCM_IV_LENGTH_BYTES).also { secureRandom.nextBytes(it) }
-        val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
-        val spec = PBEKeySpec(password.toCharArray(), salt, 10000, 256)
-        val secretKey = SecretKeySpec(factory.generateSecret(spec).encoded, "AES")
-
-        val cipher = Cipher.getInstance(AES_MODE)
-        cipher.init(Cipher.ENCRYPT_MODE, secretKey, GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
-        val cipherBytes = cipher.doFinal(jsonPlaintext.toByteArray(StandardCharsets.UTF_8))
-
-        val saltB64 = Base64.encodeToString(salt, Base64.NO_WRAP)
-        val ivB64 = Base64.encodeToString(iv, Base64.NO_WRAP)
-        val dataB64 = Base64.encodeToString(cipherBytes, Base64.NO_WRAP)
-        return "ZCVAULT_V1::$saltB64::$ivB64::$dataB64"
+        require(password.length >= MIN_BACKUP_PASSWORD_LENGTH) { "Backup password too short" }
+        val salt = randomBytes(16)
+        val key = pbkdf2(password, salt, BACKUP_PBKDF2_ITERATIONS)
+        val box = aesGcmEncrypt(key, jsonPlaintext.utf8(), "ZCVAULT_V2".utf8())
+        return listOf("ZCVAULT_V2", BACKUP_PBKDF2_ITERATIONS.toString(), b64(salt), box.iv, box.ciphertext)
+            .joinToString("::")
     }
 
-    /**
-     * Decrypts a `.zcvault` backup archive string using the user's password.
-     */
     fun decryptBackupArchive(vaultPayload: String, password: String): Result<String> = runCatching {
-        val cleaned = vaultPayload.trim()
-        require(cleaned.startsWith("ZCVAULT_V1::")) { "Geçersiz .zcvault yedek formatı" }
-        val parts = cleaned.split("::")
-        require(parts.size == 4) { "Bozuk .zcvault yedek başlığı" }
-
-        val salt = Base64.decode(parts[1], Base64.NO_WRAP)
-        val iv = Base64.decode(parts[2], Base64.NO_WRAP)
-        val cipherBytes = Base64.decode(parts[3], Base64.NO_WRAP)
-
-        val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
-        val spec = PBEKeySpec(password.toCharArray(), salt, 10000, 256)
-        val secretKey = SecretKeySpec(factory.generateSecret(spec).encoded, "AES")
-
-        val cipher = Cipher.getInstance(AES_MODE)
-        cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
-        String(cipher.doFinal(cipherBytes), StandardCharsets.UTF_8)
-    }
-
-    fun generateIdentityMaterial(userId: String, username: String): Pair<String, String> {
-        val seed = "$userId::$username::ZEROCHAT_ID_KEY"
-        val hash = sha256Bytes(seed)
-        val publicKeyB64 = "ZC-PUB-25519-" + Base64.encodeToString(hash, Base64.NO_WRAP)
-
-        val digitsBuilder = StringBuilder()
-        for (i in 0 until 12) {
-            val blockSeed = sha256Bytes("$seed::block::$i")
-            val num = ((blockSeed[0].toInt() and 0xFF) shl 16) or
-                ((blockSeed[1].toInt() and 0xFF) shl 8) or
-                (blockSeed[2].toInt() and 0xFF)
-            val fiveDigits = (num % 100000).toString().padStart(5, '0')
-            if (i > 0) digitsBuilder.append(if (i % 4 == 0) "\n" else " ")
-            digitsBuilder.append(fiveDigits)
+        val parts = vaultPayload.trim().split("::")
+        when (parts.firstOrNull()) {
+            "ZCVAULT_V2" -> {
+                require(parts.size == 5) { "Bozuk .zcvault yedek başlığı" }
+                val iterations = parts[1].toInt()
+                require(iterations in 10_000..5_000_000) { "Geçersiz yedek parametresi" }
+                val key = pbkdf2(password, unb64(parts[2]), iterations)
+                String(aesGcmDecrypt(key, parts[3], parts[4], "ZCVAULT_V2".utf8()), StandardCharsets.UTF_8)
+            }
+            "ZCVAULT_V1" -> {
+                require(parts.size == 4) { "Bozuk .zcvault yedek başlığı" }
+                val key = pbkdf2(password, unb64(parts[1]), 10_000)
+                String(aesGcmDecrypt(key, parts[2], parts[3]), StandardCharsets.UTF_8)
+            }
+            else -> throw IllegalArgumentException("Geçersiz .zcvault yedek formatı")
         }
-        return publicKeyB64 to digitsBuilder.toString()
-    }
-
-    fun computeDirectRoomKeyHint(uidA: String, uidB: String): String {
-        val sorted = listOf(uidA, uidB).sorted().joinToString("::")
-        return "DIRECT_" + sha256Hex(sorted).take(24)
-    }
-
-    fun deriveSafetyEmojis(seed: String): String {
-        val cleanSeed = stripKeyHintPrefix(seed.trim())
-        val bytes = sha256Bytes("ZEROCHAT_SAFETY_V2::$cleanSeed")
-        return (0 until 4).map { idx ->
-            val b = bytes[idx].toInt() and 0xFF
-            verificationEmojisPool[b % verificationEmojisPool.size]
-        }.joinToString("  ")
-    }
-
-    /**
-     * Derives identical 4 verification emojis on both devices by canonically sorting the two participants' usernames.
-     */
-    fun deriveCanonicalPeerSafetyEmojis(
-        usernameA: String?,
-        usernameB: String?,
-        fallbackSeed: String = ""
-    ): String {
-        val cleanA = usernameA.orEmpty().trim().removePrefix("@").lowercase()
-        val cleanB = usernameB.orEmpty().trim().removePrefix("@").lowercase()
-        val canonicalSeed = if (cleanA.isNotBlank() && cleanB.isNotBlank() && cleanA != cleanB) {
-            "PAIR::" + listOf(cleanA, cleanB).sorted().joinToString("::")
-        } else {
-            stripKeyHintPrefix(fallbackSeed.ifBlank { "$cleanA::$cleanB" })
-        }
-        return deriveSafetyEmojis(canonicalSeed)
-    }
-
-    /**
-     * Derives an identical 60-digit safety number on both devices for a pair of usernames.
-     */
-    fun deriveCanonicalSafetyNumber(
-        usernameA: String?,
-        usernameB: String?,
-        fallbackSeed: String = ""
-    ): String {
-        val cleanA = usernameA.orEmpty().trim().removePrefix("@").lowercase()
-        val cleanB = usernameB.orEmpty().trim().removePrefix("@").lowercase()
-        val canonicalSeed = if (cleanA.isNotBlank() && cleanB.isNotBlank() && cleanA != cleanB) {
-            "PAIR::" + listOf(cleanA, cleanB).sorted().joinToString("::")
-        } else {
-            stripKeyHintPrefix(fallbackSeed.ifBlank { "$cleanA::$cleanB" })
-        }
-        return generateIdentityMaterial("CANONICAL", canonicalSeed).second
-    }
-
-    /**
-     * Encrypts a hidden steganographic message with a dedicated stego subkey ("STEGO_LAYER::roomKeyHint")
-     * and formats an LSB carrier signature packet.
-     */
-    fun embedStegoPayload(secretPlaintext: String, roomKeyHint: String): String {
-        val stegoKeyHint = "STEGO_LAYER::$roomKeyHint"
-        val enc = encrypt(secretPlaintext, stegoKeyHint, 0)
-        val lsbSignature = sha256Hex("LSB_CARRIER::${enc.ciphertext}").take(16)
-        return "ZCSTEGO_V1::${enc.iv}::${enc.ciphertext}::$lsbSignature"
-    }
-
-    /**
-     * Extracts and decrypts a hidden steganographic message from a carrier packet.
-     */
-    fun extractStegoPayload(stegoPacket: String, roomKeyHint: String): String? {
-        if (!stegoPacket.startsWith("ZCSTEGO_V1::")) return null
-        val parts = stegoPacket.split("::")
-        if (parts.size < 3) return null
-        val iv = parts[1]
-        val cipher = parts[2]
-        val stegoKeyHint = "STEGO_LAYER::$roomKeyHint"
-        return decrypt(cipher, iv, stegoKeyHint, 0)
-    }
-
-    fun hashPin(pin: String): String {
-        return sha256Hex("ZEROCHAT_VAULT_PIN::$pin")
-    }
-
-    fun sha256Hex(input: String): String {
-        return sha256Bytes(input).joinToString("") { "%02x".format(it) }
-    }
-
-    private fun sha256Bytes(input: String): ByteArray {
-        val digest = MessageDigest.getInstance("SHA-256")
-        return digest.digest(input.toByteArray(StandardCharsets.UTF_8))
     }
 }
