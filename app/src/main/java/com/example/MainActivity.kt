@@ -257,6 +257,16 @@ fun ZeroChatAuthenticatedShell(
         }
     }
 
+    // Remove the incoming-call notification once the call was answered, declined or timed out.
+    var lastRingingCallId by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(incomingRingingCall?.id) {
+        val previous = lastRingingCallId
+        if (previous != null && previous != incomingRingingCall?.id) {
+            ZeroChatNotificationHelper.cancel(context, previous.hashCode())
+        }
+        lastRingingCallId = incomingRingingCall?.id
+    }
+
     // Automatic Vault Lock when app moves to background (ON_STOP)
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->

@@ -63,6 +63,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -921,14 +922,19 @@ fun LiveVideoCallCameraPreview(
         }
     }
 
+    val currentOnFrame by rememberUpdatedState(onFrameCapturedBase64)
+
     DisposableEffect(lifecycleOwner, lensFacing, hasCameraPermission) {
         if (!hasCameraPermission) return@DisposableEffect onDispose {}
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
         val analysisExecutor = Executors.newSingleThreadExecutor()
         val mainExecutor = ContextCompat.getMainExecutor(context)
+        val disposed = java.util.concurrent.atomic.AtomicBoolean(false)
+        var boundUseCases: Array<androidx.camera.core.UseCase> = emptyArray()
         var lastFrameMillis = 0L
 
         val listener = Runnable {
+            if (disposed.get()) return@Runnable
             try {
                 val cameraProvider = cameraProviderFuture.get()
                 val preview = Preview.Builder().build().also {
@@ -940,19 +946,12 @@ fun LiveVideoCallCameraPreview(
                     .also { analysis ->
                         analysis.setAnalyzer(analysisExecutor) { imageProxy ->
                             val now = System.currentTimeMillis()
-                            if (onFrameCapturedBase64 != null && (now - lastFrameMillis) >= 1100L) {
+                            val callback = currentOnFrame
+                            if (callback != null && (now - lastFrameMillis) >= VIDEO_FRAME_INTERVAL_MS) {
                                 lastFrameMillis = now
                                 try {
-                                    val bmp = imageProxy.toBitmap()
-                                    val targetW = 200
-                                    val targetH = (200f * bmp.height / bmp.width.coerceAtLeast(1)).toInt().coerceIn(150, 280)
-                                    val scaled = Bitmap.createScaledBitmap(bmp, targetW, targetH, true)
-                                    val baos = ByteArrayOutputStream()
-                                    scaled.compress(Bitmap.CompressFormat.JPEG, 44, baos)
-                                    val b64 = "data:image/jpeg;base64," + Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
-                                    mainExecutor.execute {
-                                        onFrameCapturedBase64(b64)
-                                    }
+                                    val frame = encodeVideoFrame(imageProxy.toBitmap(), imageProxy.imageInfo.rotationDegrees)
+                                    mainExecutor.execute { if (!disposed.get()) callback(frame) }
                                 } catch (_: Exception) {
                                 }
                             }
@@ -963,7 +962,7 @@ fun LiveVideoCallCameraPreview(
                 val selector = CameraSelector.Builder()
                     .requireLensFacing(lensFacing)
                     .build()
-                cameraProvider.unbindAll()
+                boundUseCases = arrayOf(preview, imageAnalysis)
                 cameraProvider.bindToLifecycle(lifecycleOwner, selector, preview, imageAnalysis)
             } catch (e: Exception) {
                 Log.e("VideoCallCamera", "Failed to bind video call preview", e)
@@ -971,9 +970,10 @@ fun LiveVideoCallCameraPreview(
         }
         cameraProviderFuture.addListener(listener, mainExecutor)
         onDispose {
-            try {
-                cameraProviderFuture.get().unbindAll()
-            } catch (_: Exception) {
+            disposed.set(true)
+            // Only unbind what this preview bound; never block the main thread on the future.
+            if (cameraProviderFuture.isDone && boundUseCases.isNotEmpty()) {
+                runCatching { cameraProviderFuture.get().unbind(*boundUseCases) }
             }
             analysisExecutor.shutdown()
         }
@@ -1119,3 +1119,20 @@ fun encodeDocumentUriToBase64(context: Context, uri: android.net.Uri, maxBytes: 
     }
 }
 
+private const val VIDEO_FRAME_INTERVAL_MS = 1_500L
+
+/** Downscales, rotates upright and JPEG-encodes one camera frame as a data URI. */
+private fun encodeVideoFrame(source: Bitmap, rotationDegrees: Int): String {
+    val targetW = 240
+    val targetH = (targetW.toFloat() * source.height / source.width.coerceAtLeast(1)).toInt().coerceAtLeast(1)
+    val scaled = Bitmap.createScaledBitmap(source, targetW, targetH, true)
+    val upright = if (rotationDegrees != 0) {
+        val matrix = android.graphics.Matrix().apply { postRotate(rotationDegrees.toFloat()) }
+        Bitmap.createBitmap(scaled, 0, 0, scaled.width, scaled.height, matrix, true)
+    } else {
+        scaled
+    }
+    val out = ByteArrayOutputStream()
+    upright.compress(Bitmap.CompressFormat.JPEG, 50, out)
+    return "data:image/jpeg;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+}

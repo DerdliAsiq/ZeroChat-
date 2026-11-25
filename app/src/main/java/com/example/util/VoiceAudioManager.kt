@@ -24,6 +24,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
+import kotlin.coroutines.resume
 
 data class RecordedVoiceClip(
     val durationSeconds: Int,
@@ -35,6 +36,7 @@ class VoiceAudioManager(private val context: Context) {
 
     private var mediaRecorder: MediaRecorder? = null
     private var mediaPlayer: MediaPlayer? = null
+    private var currentPlaybackFile: File? = null
     private var currentOutputFile: File? = null
     private var startTimestampMillis: Long = 0L
     private val amplitudeSamples = mutableListOf<Int>()
@@ -175,6 +177,34 @@ class VoiceAudioManager(private val context: Context) {
         ""
     }
 
+    /** Plays one clip and suspends until it finishes; cancelling the coroutine stops playback. */
+    suspend fun playBase64AudioAndWait(audioBase64: String) {
+        if (audioBase64.isBlank()) return
+        kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+            val started = playBase64Audio(audioBase64) { if (cont.isActive) cont.resume(Unit) }
+            if (!started && cont.isActive) cont.resume(Unit)
+            cont.invokeOnCancellation { stopPlayback() }
+        }
+    }
+
+    /** Puts audio routing back to normal after a call. */
+    fun restoreNormalAudioMode() {
+        try {
+            val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+            @Suppress("DEPRECATION")
+            audioManager.isSpeakerphoneOn = false
+            audioManager.mode = AudioManager.MODE_NORMAL
+        } catch (_: Exception) {
+        }
+    }
+
+    /** Stops an in-progress voice note recording and deletes its temporary file. */
+    fun cancelRecording() {
+        stopRecordingCleanup()
+        currentOutputFile?.delete()
+        currentOutputFile = null
+    }
+
     fun setSpeakerphoneEnabled(enabled: Boolean) {
         try {
             val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
@@ -196,13 +226,19 @@ class VoiceAudioManager(private val context: Context) {
         }
         return try {
             val bytes = Base64.decode(audioBase64, Base64.NO_WRAP)
-            val tempFile = File(context.cacheDir, "zc_play_${System.currentTimeMillis()}.m4a")
+            val tempFile = File(context.cacheDir, "zc_play_${System.nanoTime()}.m4a")
             FileOutputStream(tempFile).use { it.write(bytes) }
+            currentPlaybackFile = tempFile
             val player = MediaPlayer().apply {
                 setDataSource(tempFile.absolutePath)
                 setOnCompletionListener {
-                    tempFile.delete()
+                    stopPlayback()
                     onCompletion()
+                }
+                setOnErrorListener { _, _, _ ->
+                    stopPlayback()
+                    onCompletion()
+                    true
                 }
                 prepare()
                 try {
@@ -215,6 +251,7 @@ class VoiceAudioManager(private val context: Context) {
             true
         } catch (e: Exception) {
             Log.w("VoiceAudioManager", "Playback fallback: ${e.message}")
+            stopPlayback()
             false
         }
     }
@@ -229,6 +266,9 @@ class VoiceAudioManager(private val context: Context) {
         } catch (_: Exception) {
         }
         mediaPlayer = null
+        // Decrypted audio never stays in the cache directory.
+        currentPlaybackFile?.delete()
+        currentPlaybackFile = null
     }
 
     private fun stopRecordingCleanup() {
@@ -243,6 +283,11 @@ class VoiceAudioManager(private val context: Context) {
 object ZeroChatNotificationHelper {
     private const val CHANNEL_MESSAGES = "zerochat_messages_channel"
     private const val CHANNEL_CALLS = "zerochat_calls_channel"
+    const val CHANNEL_ONGOING_CALL = "zerochat_ongoing_call_channel"
+
+    fun cancel(context: Context, notificationId: Int) {
+        NotificationManagerCompat.from(context).cancel(notificationId)
+    }
 
     fun ensureChannels(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -263,8 +308,14 @@ object ZeroChatNotificationHelper {
                 description = "Gelen sesli ve görüntülü aramalar"
                 enableVibration(true)
             }
+            val ongoingChannel = NotificationChannel(
+                CHANNEL_ONGOING_CALL,
+                "Devam Eden Arama",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply { description = "Arama sürerken mikrofon ve kameranın çalışmaya devam etmesi için" }
             nm.createNotificationChannel(msgChannel)
             nm.createNotificationChannel(callChannel)
+            nm.createNotificationChannel(ongoingChannel)
         }
     }
 
@@ -298,11 +349,19 @@ object ZeroChatNotificationHelper {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
             val notification = NotificationCompat.Builder(context, CHANNEL_MESSAGES)
-                .setSmallIcon(R.mipmap.ic_launcher_round)
+                .setSmallIcon(R.drawable.ic_stat_zerochat)
                 .setContentTitle(senderTitle)
                 .setContentText(messagePreview)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+                .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+                .setPublicVersion(
+                    NotificationCompat.Builder(context, CHANNEL_MESSAGES)
+                        .setSmallIcon(R.drawable.ic_stat_zerochat)
+                        .setContentTitle("ZeroChat")
+                        .setContentText("Yeni mesaj")
+                        .build()
+                )
                 .setAutoCancel(true)
                 .setContentIntent(pendingIntent)
                 .build()
@@ -332,11 +391,12 @@ object ZeroChatNotificationHelper {
             )
             val callLabel = if (isVideo) "Gelen Görüntülü Arama" else "Gelen Sesli Arama"
             val notification = NotificationCompat.Builder(context, CHANNEL_CALLS)
-                .setSmallIcon(R.mipmap.ic_launcher_round)
+                .setSmallIcon(R.drawable.ic_stat_zerochat)
                 .setContentTitle("@$callerUsername • $callLabel")
                 .setContentText("Yanıtlamak için dokunun")
                 .setPriority(NotificationCompat.PRIORITY_MAX)
                 .setCategory(NotificationCompat.CATEGORY_CALL)
+                .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
                 .setAutoCancel(true)
                 .setContentIntent(pendingIntent)
                 .build()

@@ -59,7 +59,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -86,6 +88,7 @@ import com.example.ui.theme.CyberCyan
 import com.example.ui.theme.NeonCyberGreen
 import com.example.ui.theme.ObsidianBlack
 import com.example.util.LiveVideoCallCameraPreview
+import com.example.util.CallForegroundService
 import com.example.util.VoiceAudioManager
 import com.example.util.decodeBase64DataUriToImageBitmap
 import kotlinx.coroutines.delay
@@ -849,19 +852,32 @@ fun ActiveP2PCallOverlay(
 
     val remoteAudioB64 = callSignal.remoteAudioB64
     val remoteVideoB64 = callSignal.remoteVideoB64
-    val remoteVideoBitmap = remember(remoteVideoB64) {
-        if (remoteVideoB64.isNotBlank()) decodeBase64DataUriToImageBitmap(remoteVideoB64) else null
+    // Decode incoming frames off the main thread; keep showing the previous frame meanwhile.
+    val remoteVideoBitmap by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, remoteVideoB64) {
+        if (remoteVideoB64.isNotBlank()) {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                decodeBase64DataUriToImageBitmap(remoteVideoB64)
+            }?.let { value = it }
+        }
     }
 
     val permissionsLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { _ -> }
 
+    val isConnected = callSignal.status == "CONNECTED"
+    // Latest local camera frame; sent together with the next audio chunk (one write per ~2 s).
+    val latestLocalFrame = remember { java.util.concurrent.atomic.AtomicReference<String?>(null) }
+    val currentIsVideoEnabled by rememberUpdatedState(isVideoEnabled)
+    val currentIsMuted by rememberUpdatedState(isMuted)
+    val currentOnPush by rememberUpdatedState(onPushMediaChunk)
+
     DisposableEffect(Unit) {
         voiceAudioManager.setSpeakerphoneEnabled(true)
         onDispose {
             voiceAudioManager.stopPlayback()
-            voiceAudioManager.setSpeakerphoneEnabled(false)
+            voiceAudioManager.restoreNormalAudioMode()
+            CallForegroundService.stop(context)
         }
     }
 
@@ -875,9 +891,14 @@ fun ActiveP2PCallOverlay(
         )
     }
 
+    // Keep mic/camera alive in the background while connected.
+    LaunchedEffect(isConnected) {
+        if (isConnected) CallForegroundService.start(context, remotePeerUsername, callSignal.callType == "VIDEO")
+    }
+
     // Start call timer ONLY when call status is CONNECTED
-    LaunchedEffect(callSignal.status) {
-        if (callSignal.status == "CONNECTED") {
+    LaunchedEffect(isConnected) {
+        if (isConnected) {
             while (isActive) {
                 delay(1000L)
                 elapsedSeconds++
@@ -887,36 +908,35 @@ fun ActiveP2PCallOverlay(
         }
     }
 
-    // Play incoming remote audio chunks automatically when CONNECTED
-    LaunchedEffect(callSignal.remoteSeq, callSignal.status) {
-        if (callSignal.status == "CONNECTED" &&
-            remoteAudioB64.isNotBlank() &&
-            callSignal.remoteSeq > lastPlayedMediaSeq
-        ) {
+    // Incoming audio is queued and played in order without cutting the previous chunk off.
+    val playbackQueue = remember { kotlinx.coroutines.channels.Channel<String>(capacity = 4, onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST) }
+    LaunchedEffect(callSignal.remoteSeq) {
+        if (isConnected && remoteAudioB64.isNotBlank() && callSignal.remoteSeq > lastPlayedMediaSeq) {
             lastPlayedMediaSeq = callSignal.remoteSeq
-            voiceAudioManager.playBase64Audio(
-                audioBase64 = remoteAudioB64,
-                onCompletion = {}
-            )
+            playbackQueue.trySend(remoteAudioB64)
+        }
+    }
+    LaunchedEffect(Unit) {
+        for (chunk in playbackQueue) {
+            voiceAudioManager.playBase64AudioAndWait(chunk)
         }
     }
 
-    // Record & push live microphone audio chunks while CONNECTED and not muted
-    LaunchedEffect(callSignal.status, isMuted) {
-        if (callSignal.status == "CONNECTED" && !isMuted) {
-            while (isActive && !isMuted && callSignal.status == "CONNECTED") {
-                val hasMicPerm = ContextCompat.checkSelfPermission(
-                    context,
-                    Manifest.permission.RECORD_AUDIO
-                ) == PackageManager.PERMISSION_GRANTED
-                if (hasMicPerm) {
-                    val chunkB64 = voiceAudioManager.recordShortCallAudioChunk(1350L)
-                    if (chunkB64.isNotBlank()) {
-                        onPushMediaChunk(chunkB64, null)
-                    }
-                } else {
-                    delay(1500L)
-                }
+    // One encrypted write per ~2 s: the latest audio chunk plus the latest video frame.
+    LaunchedEffect(isConnected) {
+        if (!isConnected) return@LaunchedEffect
+        while (isActive) {
+            val hasMicPerm = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED
+            val audio = if (hasMicPerm && !currentIsMuted) {
+                voiceAudioManager.recordShortCallAudioChunk(CALL_CHUNK_MS)
+            } else {
+                delay(CALL_CHUNK_MS)
+                ""
+            }
+            val frame = if (currentIsVideoEnabled) latestLocalFrame.getAndSet(null) else null
+            if (audio.isNotBlank() || frame != null) {
+                currentOnPush(audio.ifBlank { null }, frame)
             }
         }
     }
@@ -1034,38 +1054,27 @@ fun ActiveP2PCallOverlay(
                                 .clip(RoundedCornerShape(18.dp))
                                 .background(ObsidianBlack)
                         ) {
-                            if (remoteVideoBitmap != null) {
+                            val remoteFrame = remoteVideoBitmap
+                            if (remoteFrame != null) {
                                 Image(
-                                    bitmap = remoteVideoBitmap,
+                                    bitmap = remoteFrame,
                                     contentDescription = "Karşı Tarafın Görüntüsü",
                                     contentScale = ContentScale.Crop,
                                     modifier = Modifier.fillMaxSize()
                                 )
-                                if (isVideoEnabled) {
-                                    Box(
-                                        modifier = Modifier
+                            }
+                            if (isVideoEnabled) {
+                                // Single call site so the camera is not rebound when the first remote frame arrives.
+                                LiveVideoCallCameraPreview(
+                                    modifier = if (remoteVideoBitmap != null) {
+                                        Modifier
                                             .align(Alignment.BottomEnd)
                                             .padding(10.dp)
                                             .size(width = 100.dp, height = 135.dp)
-                                    ) {
-                                        LiveVideoCallCameraPreview(
-                                            modifier = Modifier.fillMaxSize(),
-                                            onFrameCapturedBase64 = { frameB64 ->
-                                                if (callSignal.status == "CONNECTED") {
-                                                    onPushMediaChunk(null, frameB64)
-                                                }
-                                            }
-                                        )
-                                    }
-                                }
-                            } else if (isVideoEnabled) {
-                                LiveVideoCallCameraPreview(
-                                    modifier = Modifier.fillMaxSize(),
-                                    onFrameCapturedBase64 = { frameB64 ->
-                                        if (callSignal.status == "CONNECTED") {
-                                            onPushMediaChunk(null, frameB64)
-                                        }
-                                    }
+                                    } else {
+                                        Modifier.fillMaxSize()
+                                    },
+                                    onFrameCapturedBase64 = { frameB64 -> latestLocalFrame.set(frameB64) }
                                 )
                             }
                         }
@@ -1331,3 +1340,6 @@ fun IncomingCallRingingOverlay(
         }
     }
 }
+
+/** Length of one recorded call audio chunk; also the media write interval per participant. */
+private const val CALL_CHUNK_MS = 2_000L
