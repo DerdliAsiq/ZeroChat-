@@ -19,3 +19,17 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# ---- ZeroChat ----
+# Firestore maps documents to these classes reflectively (field names = document keys).
+-keep class com.example.data.model.** { *; }
+-keepclassmembers class com.example.data.model.** { <init>(...); }
+-keepattributes Signature,*Annotation*,InnerClasses,EnclosingMethod
+
+# SQLCipher uses JNI callbacks into these classes.
+-keep class net.zetetic.database.** { *; }
+-dontwarn net.zetetic.database.**
+
+# Keep line numbers for crash reports, hide source file names.
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile

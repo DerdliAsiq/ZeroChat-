@@ -63,6 +63,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -711,12 +712,11 @@ fun ChatListAndDiscoveryScreen(
         }
     }
 
-    if (peerForRequestDialog != null) {
+    peerForRequestDialog?.let { target ->
         SendConnectionRequestDialog(
-            peer = peerForRequestDialog!!,
+            peer = target,
             onDismiss = { peerForRequestDialog = null },
             onSendRequest = { introNote ->
-                val target = peerForRequestDialog!!
                 peerForRequestDialog = null
                 onSelectPeerForChat(target, introNote)
             }
@@ -740,8 +740,7 @@ fun ChatListAndDiscoveryScreen(
         )
     }
 
-    if (roomPendingDelete != null) {
-        val targetRoom = roomPendingDelete!!
+    roomPendingDelete?.let { targetRoom ->
         Dialog(onDismissRequest = { roomPendingDelete = null }) {
             Card(
                 shape = RoundedCornerShape(22.dp),
@@ -866,7 +865,7 @@ private fun IncomingRequestsInboxSection(
             )
             Spacer(modifier = Modifier.height(10.dp))
 
-            incomingRooms.forEach { reqRoom ->
+            incomingRooms.forEach { reqRoom -> key(reqRoom.id) {
                 val notePreview = reqRoom.previewText.ifBlank { "🤝 @${reqRoom.requesterUsername} sizinle sohbet başlatmak istiyor." }
                 Surface(
                     shape = RoundedCornerShape(12.dp),
@@ -948,7 +947,7 @@ private fun IncomingRequestsInboxSection(
                         }
                     }
                 }
-            }
+            } }
         }
     }
 }
@@ -1619,10 +1618,10 @@ private fun VaultPinEntryDialog(
                         .fillMaxWidth()
                         .testTag("pin_dialog_input")
                 )
-                if (feedback != null) {
+                feedback?.let { feedbackText ->
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = feedback!!,
+                        text = feedbackText,
                         style = MaterialTheme.typography.labelSmall,
                         color = BurnCoralRed
                     )

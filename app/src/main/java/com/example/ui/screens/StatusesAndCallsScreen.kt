@@ -230,13 +230,13 @@ fun StatusesTabScreen(
         )
     }
 
-    if (selectedStatusForViewer != null) {
+    selectedStatusForViewer?.let { viewedStatus ->
         val peers = (directoryState as? UiState.Success)?.data ?: emptyList()
         StatusStoryViewerDialog(
-            status = selectedStatusForViewer!!,
+            status = viewedStatus,
             knownPeers = peers,
             onReply = { replyText ->
-                onReplyToStatus(selectedStatusForViewer!!, replyText)
+                onReplyToStatus(viewedStatus, replyText)
                 selectedStatusForViewer = null
             },
             onDismiss = { selectedStatusForViewer = null }

@@ -83,6 +83,14 @@ data class VaultSecurityConfigEntity(
     val hasPins: Boolean get() = pinSalt.isNotBlank() && normalPinHash.isNotBlank() && panicPinHash.isNotBlank()
 }
 
+/** View-once messages this user has already opened on this device. */
+@Entity(tableName = "consumed_view_once", primaryKeys = ["ownerUid", "messageId"])
+data class ConsumedViewOnceEntity(
+    val ownerUid: String,
+    val messageId: String,
+    val consumedAtMillis: Long = System.currentTimeMillis()
+)
+
 /** A message that could not be sent yet. [envelopeId] makes retries idempotent. */
 @Entity(tableName = "offline_outbox_queue")
 data class PendingOutboxEntity(
@@ -222,6 +230,12 @@ interface LocalVaultDao {
     @Query("DELETE FROM offline_outbox_queue WHERE ownerUid = :uid")
     suspend fun clearOutbox(uid: String)
 
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun markViewOnceConsumed(entity: ConsumedViewOnceEntity)
+
+    @Query("SELECT messageId FROM consumed_view_once WHERE ownerUid = :uid")
+    fun observeConsumedViewOnce(uid: String): Flow<List<String>>
+
     @Query("DELETE FROM scheduled_envelopes WHERE ownerUid = :uid")
     suspend fun clearScheduled(uid: String)
 }
@@ -235,9 +249,10 @@ interface LocalVaultDao {
         ScheduledEnvelopeEntity::class,
         VaultSecurityConfigEntity::class,
         PendingOutboxEntity::class,
-        CachedVaultMessageEntity::class
+        CachedVaultMessageEntity::class,
+        ConsumedViewOnceEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = true
 )
 abstract class LocalVaultDatabase : RoomDatabase() {
@@ -252,6 +267,15 @@ abstract class LocalVaultDatabase : RoomDatabase() {
         @Volatile
         private var INSTANCE: LocalVaultDatabase? = null
 
+        val MIGRATION_1_2 = object : androidx.room.migration.Migration(1, 2) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `consumed_view_once` (`ownerUid` TEXT NOT NULL, " +
+                        "`messageId` TEXT NOT NULL, `consumedAtMillis` INTEGER NOT NULL, PRIMARY KEY(`ownerUid`, `messageId`))"
+                )
+            }
+        }
+
         fun getInstance(context: Context): LocalVaultDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: build(context.applicationContext).also { INSTANCE = it }
@@ -264,6 +288,7 @@ abstract class LocalVaultDatabase : RoomDatabase() {
             val passphrase = loadOrCreatePassphrase(app)
             return Room.databaseBuilder(app, LocalVaultDatabase::class.java, DB_NAME)
                 .openHelperFactory(SupportOpenHelperFactory(passphrase))
+                .addMigrations(MIGRATION_1_2)
                 // Add Migration objects here for every future schema change; there is no
                 // destructive fallback, so local data (PINs, outbox) is never silently wiped.
                 .build()

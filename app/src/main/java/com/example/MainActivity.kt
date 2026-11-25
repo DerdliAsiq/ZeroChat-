@@ -469,6 +469,11 @@ fun ZeroChatAuthenticatedShell(
                     onCancelScheduledMessage = viewModel::cancelScheduledMessage,
                     onNukeRoomHistory = viewModel::nukeActiveRoomHistory,
                     onNotifySecureClipboard = viewModel::notifySecureClipboardCopied,
+                    onShowMessage = viewModel::postBannerMessage,
+                    onViewOnceConsumed = viewModel::markViewOnceConsumed,
+                    peerOnline = activeRoom.peerUidFor(currentUserId)
+                        ?.let { uid -> directoryPeersList.firstOrNull { it.userId == uid } }
+                        ?.let { it.onlineStatus == "ONLINE" },
                     onApproveConnectionRequest = { viewModel.approveConnectionRequest(activeRoom) },
                     onRejectOrCancelConnectionRequest = { viewModel.rejectOrCancelConnectionRequest(activeRoom) },
                     onBack = { viewModel.closeRoom() },

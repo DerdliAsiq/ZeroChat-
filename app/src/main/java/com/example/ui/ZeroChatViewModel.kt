@@ -172,6 +172,10 @@ class ZeroChatViewModel(
         .map { list -> list.map { it.roomId }.toSet() }
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
 
+    private val consumedViewOnce: StateFlow<Set<String>> = vaultDao.observeConsumedViewOnce(currentUserId)
+        .map { it.toSet() }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, emptySet())
+
     private val hiddenRooms: StateFlow<Map<String, Long>> = vaultDao.observeHiddenRooms(currentUserId)
         .map { list -> list.associate { it.roomId to it.hiddenAtMillis } }
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
@@ -386,6 +390,9 @@ class ZeroChatViewModel(
                 it.senderUsername.lowercase(Locale.ROOT).contains(q) ||
                 it.fileName.lowercase(Locale.ROOT).contains(q)
         }
+    }.combine(consumedViewOnce) { list, consumed ->
+        // A view-once message disappears for the recipient after it was opened once.
+        list.filterNot { it.isViewOnce && it.senderId != currentUserId && consumed.contains(it.id) }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000L), emptyList())
 
     private fun onMessageExpired(msg: DecryptedMessageItem) {
@@ -1333,6 +1340,14 @@ class ZeroChatViewModel(
         viewModelScope.launch {
             repository.setAnnotation(room, message.id, AnnotationKind.REACTION, if (mine == emoji) null else emoji)
                 .onFailure { banner("Tepki eklenemedi: ${it.userMessage()}") }
+        }
+    }
+
+    /** Recipient opened a view-once message: it is hidden on this device from now on. */
+    fun markViewOnceConsumed(messageId: String) {
+        viewModelScope.launch {
+            vaultDao.markViewOnceConsumed(com.example.data.local.ConsumedViewOnceEntity(currentUserId, messageId))
+            vaultDao.deleteCachedMessages(listOf(messageId))
         }
     }
 

@@ -103,6 +103,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -143,6 +144,11 @@ import com.example.ui.theme.ObsidianBlack
 import com.example.ui.theme.OutgoingBubbleSurface
 import com.example.util.RealCameraPhotoCaptureDialog
 import com.example.util.VoiceAudioManager
+import com.example.util.fetchCurrentLocation
+import com.example.util.readDocumentForSending
+import com.example.util.encodeImageForSending
+import com.example.util.MAX_VOICE_NOTE_SECONDS
+import com.example.util.MAX_ATTACHMENT_BYTES
 import com.example.util.decodeBase64DataUriToImageBitmap
 import com.example.util.encodeDocumentUriToBase64
 import com.example.util.encodeUriToEncryptedDataUri
@@ -182,6 +188,9 @@ fun ChatConversationScreen(
     onCancelScheduledMessage: (Long) -> Unit = {},
     onNukeRoomHistory: () -> Unit = {},
     onNotifySecureClipboard: () -> Unit = {},
+    onShowMessage: (String) -> Unit = {},
+    onViewOnceConsumed: (String) -> Unit = {},
+    peerOnline: Boolean? = null,
     onApproveConnectionRequest: () -> Unit = {},
     onRejectOrCancelConnectionRequest: () -> Unit = {},
     onBack: () -> Unit,
@@ -206,6 +215,7 @@ fun ChatConversationScreen(
     DisposableEffect(Unit) {
         onDispose {
             voiceAudioManager.stopPlayback()
+            voiceAudioManager.cancelRecording()
         }
     }
 
@@ -230,9 +240,15 @@ fun ChatConversationScreen(
     var playingMessageId by remember { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
 
+    var initialScrollDone by remember(room.id) { mutableStateOf(false) }
     LaunchedEffect(messages.size, messages.lastOrNull()?.id, room.id) {
-        if (messages.isNotEmpty()) {
+        if (messages.isEmpty()) return@LaunchedEffect
+        val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+        val nearBottom = lastVisible >= listState.layoutInfo.totalItemsCount - 3
+        val sentByMe = messages.last().senderId == currentUserId
+        if (!initialScrollDone || nearBottom || sentByMe) {
             listState.animateScrollToItem(messages.size)
+            initialScrollDone = true
         }
     }
 
@@ -249,6 +265,13 @@ fun ChatConversationScreen(
                 delay(1000L)
                 voiceAudioManager.sampleAmplitude()
                 recordingElapsedSeconds++
+                if (recordingElapsedSeconds >= MAX_VOICE_NOTE_SECONDS) {
+                    // A longer note would not fit in one encrypted message: send what we have.
+                    val res = voiceAudioManager.stopRecording()
+                    isRecordingAudio = false
+                    onShowMessage("Sesli mesaj en fazla $MAX_VOICE_NOTE_SECONDS sn olabilir; kayıt gönderildi")
+                    onSendVoiceNote(res.durationSeconds.coerceAtLeast(1), res.waveformString, res.audioBase64, selectedTtlOverride)
+                }
             }
         }
     }
@@ -284,14 +307,16 @@ fun ChatConversationScreen(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri != null) {
-            val encodedDataUri = encodeUriToEncryptedDataUri(context, uri) ?: uri.toString()
-            onSendImageAttachment(
-                encodedDataUri,
-                "",
-                selectedTtlOverride,
-                isViewOnceSelected
-            )
+            val viewOnce = isViewOnceSelected
             isViewOnceSelected = false
+            coroutineScope.launch {
+                val encoded = encodeImageForSending(context, uri)
+                if (encoded == null) {
+                    onShowMessage("Görsel okunamadı veya çok büyük")
+                } else {
+                    onSendImageAttachment(encoded, "", selectedTtlOverride, viewOnce)
+                }
+            }
         }
     }
 
@@ -300,26 +325,16 @@ fun ChatConversationScreen(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri != null) {
-            var displayName = "sifreli_belge.bin"
-            var sizeKb = 1
-            try {
-                context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-                    if (cursor.moveToFirst()) {
-                        val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                        val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
-                        if (nameIdx >= 0) {
-                            displayName = cursor.getString(nameIdx) ?: displayName
-                        }
-                        if (sizeIdx >= 0) {
-                            sizeKb = ((cursor.getLong(sizeIdx)) / 1024L).toInt().coerceAtLeast(1)
-                        }
-                    }
+            coroutineScope.launch {
+                val doc = readDocumentForSending(context, uri)
+                val b64 = doc.base64
+                if (b64 == null) {
+                    onShowMessage("Dosya çok büyük: en fazla ${MAX_ATTACHMENT_BYTES / 1024} KB gönderilebilir")
+                } else {
+                    val sizeKb = (doc.sizeBytes / 1024L).toInt().coerceAtLeast(1)
+                    onSendFileAttachment(doc.name, sizeKb, doc.mime, b64, selectedTtlOverride)
                 }
-            } catch (_: Exception) {
             }
-            val mime = context.contentResolver.getType(uri) ?: "application/octet-stream"
-            val fileB64 = encodeDocumentUriToBase64(context, uri)
-            onSendFileAttachment(displayName, sizeKb, mime, fileB64, selectedTtlOverride)
         }
     }
 
@@ -335,49 +350,27 @@ fun ChatConversationScreen(
         }
     }
 
-    // Real GPS / Network Location runtime permission launcher
+    // Location: request precise or approximate access, then wait for a real fix.
     val locationPermissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted) {
-            try {
-                val locManager = context.getSystemService(Context.LOCATION_SERVICE) as? android.location.LocationManager
-                val providers = listOf(
-                    android.location.LocationManager.GPS_PROVIDER,
-                    android.location.LocationManager.NETWORK_PROVIDER,
-                    android.location.LocationManager.PASSIVE_PROVIDER
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { grants ->
+        if (grants.values.none { it }) {
+            onShowMessage("Konum izni verilmedi")
+            return@rememberLauncherForActivityResult
+        }
+        val precise = grants[Manifest.permission.ACCESS_FINE_LOCATION] == true
+        onShowMessage("Konum alınıyor...")
+        coroutineScope.launch {
+            val loc = fetchCurrentLocation(context)
+            if (loc == null) {
+                onShowMessage("Konum alınamadı. Konum servisini açıp tekrar deneyin.")
+            } else {
+                onSendLocation(
+                    loc.latitude,
+                    loc.longitude,
+                    if (precise) "Konumum" else "Yaklaşık konumum",
+                    selectedTtlOverride
                 )
-                var bestLoc: android.location.Location? = null
-                if (locManager != null) {
-                    for (p in providers) {
-                        val l = try {
-                            locManager.getLastKnownLocation(p)
-                        } catch (_: SecurityException) {
-                            null
-                        } catch (_: Exception) {
-                            null
-                        }
-                        if (l != null && (bestLoc == null || l.time > bestLoc.time)) {
-                            bestLoc = l
-                        }
-                    }
-                }
-                if (bestLoc != null) {
-                    onSendLocation(
-                        bestLoc.latitude,
-                        bestLoc.longitude,
-                        "Gerçek Cihaz GPS Konumu (Şifreli P2P)",
-                        selectedTtlOverride
-                    )
-                } else {
-                    onSendLocation(
-                        41.0082,
-                        28.9784,
-                        "Şifreli Konum Zarfı (GPS Sinyali Bekleniyor)",
-                        selectedTtlOverride
-                    )
-                }
-            } catch (_: Exception) {
             }
         }
     }
@@ -455,7 +448,11 @@ fun ChatConversationScreen(
                         } else if (room.isGroup) {
                             "${room.participantUids.size} Üye • Uçtan Uca Şifreli"
                         } else {
-                            "Çevrimiçi • Uçtan Uca Şifreli"
+                            when (peerOnline) {
+                                true -> "Çevrimiçi • Uçtan Uca Şifreli"
+                                false -> "Çevrimdışı • Uçtan Uca Şifreli"
+                                null -> "Uçtan Uca Şifreli"
+                            }
                         },
                         style = MaterialTheme.typography.labelSmall,
                         color = if (peerTypingHandle != null) CyberCyan else NeonCyberGreen
@@ -890,7 +887,7 @@ fun ChatConversationScreen(
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(
                             onClick = {
-                                voiceAudioManager.stopRecording()
+                                voiceAudioManager.cancelRecording()
                                 isRecordingAudio = false
                             }
                         ) {
@@ -1188,7 +1185,9 @@ fun ChatConversationScreen(
                             tint = BurnCoralRed,
                             onClick = {
                                 showAttachmentTools = false
-                                locationPermissionLauncher.launch(Manifest.permission.ACCESS_COARSE_LOCATION)
+                                locationPermissionLauncher.launch(
+                                    arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+                                )
                             }
                         )
                     }
@@ -1395,24 +1394,23 @@ fun ChatConversationScreen(
         )
     }
 
-    if (activeViewOnceMessage != null) {
+    activeViewOnceMessage?.let { viewOnce ->
         ViewOnceRevealDialog(
-            message = activeViewOnceMessage!!,
+            message = viewOnce,
             onCloseAndBurn = {
-                val idToBurn = activeViewOnceMessage!!.id
                 activeViewOnceMessage = null
-                onBurnMessageNow(idToBurn)
+                onViewOnceConsumed(viewOnce.id)
             }
         )
     }
 
-    if (forwardingMessage != null) {
+    forwardingMessage?.let { toForward ->
         ForwardMessageRoomPickerDialog(
-            message = forwardingMessage!!,
+            message = toForward,
             availableRooms = allRooms,
             onDismiss = { forwardingMessage = null },
             onSelectRoom = { targetRoom ->
-                onForwardMessageToRoom(forwardingMessage!!, targetRoom)
+                onForwardMessageToRoom(toForward, targetRoom)
                 forwardingMessage = null
             }
         )
@@ -1929,9 +1927,12 @@ private fun EncryptedMessageBubble(
                                     ""
                                 }
                             }
-                            val decodedBase64Bitmap = remember(mediaUri) {
-                                decodeBase64DataUriToImageBitmap(mediaUri)
-                            }
+                            // Decoded off the main thread so scrolling image-heavy chats does not jank.
+                            val decodedBase64Bitmap = produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, mediaUri) {
+                                value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                                    decodeBase64DataUriToImageBitmap(mediaUri)
+                                }
+                            }.value
                             if (decodedBase64Bitmap != null) {
                                 Image(
                                     bitmap = decodedBase64Bitmap,
@@ -2319,19 +2320,19 @@ private fun ViewOnceRevealDialog(
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
-                    text = "Gönderen: @${message.senderUsername} • Bu pencereyi kapattığınız anda şifreli zarf ağdan kalıcı olarak imha edilecektir.",
+                    text = "Gönderen: @${message.senderUsername} • Bu pencereyi kapattığınızda mesaj bu cihazdan kaldırılır.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(14.dp))
-                val viewOnceImageBitmap = remember(message.encryptedMeta) {
-                    val mediaUri = try {
-                        org.json.JSONObject(message.encryptedMeta).optString("mediaUri", "")
-                    } catch (_: Exception) {
-                        ""
+                val viewOnceImageBitmap = produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, message.encryptedMeta) {
+                    value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                        val mediaUri = runCatching {
+                            org.json.JSONObject(message.encryptedMeta).optString("mediaUri", "")
+                        }.getOrDefault("")
+                        decodeBase64DataUriToImageBitmap(mediaUri)
                     }
-                    decodeBase64DataUriToImageBitmap(mediaUri)
-                }
+                }.value
 
                 Surface(
                     shape = RoundedCornerShape(14.dp),

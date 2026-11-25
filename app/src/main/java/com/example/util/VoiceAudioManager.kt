@@ -108,7 +108,7 @@ class VoiceAudioManager(private val context: Context) {
             }
             mediaRecorder = null
             val file = currentOutputFile
-            if (file != null && file.exists() && file.length() in 32..185000) {
+            if (file != null && file.exists() && file.length() in 32..MAX_ATTACHMENT_BYTES) {
                 base64Audio = Base64.encodeToString(file.readBytes(), Base64.NO_WRAP)
             }
             file?.delete()

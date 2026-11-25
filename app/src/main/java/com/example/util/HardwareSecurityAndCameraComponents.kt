@@ -63,6 +63,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -338,6 +340,7 @@ fun RealCameraQrScannerView(
     var boundCamera by remember { mutableStateOf<Camera?>(null) }
     var statusText by remember { mutableStateOf("Kamerayı karşı düğümün ZeroChat QR koduna doğrultun...") }
     val hasDispatchedResult = remember { AtomicBoolean(false) }
+    val qrScope = rememberCoroutineScope()
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -352,20 +355,24 @@ fun RealCameraQrScannerView(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri != null) {
-            try {
-                context.contentResolver.openInputStream(uri)?.use { stream ->
-                    val bmp = android.graphics.BitmapFactory.decodeStream(stream)
-                    if (bmp != null) {
-                        val decoded = decodeQrFromBitmap(bmp)
-                        if (!decoded.isNullOrBlank()) {
-                            onQrCodeDetected(decoded)
-                        } else {
-                            statusText = "❌ Seçilen görselde geçerli bir QR kod bulunamadı."
-                        }
-                    }
+            statusText = "Görsel taranıyor..."
+            qrScope.launch {
+                val decoded = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                    runCatching {
+                        val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                        context.contentResolver.openInputStream(uri)?.use { android.graphics.BitmapFactory.decodeStream(it, null, bounds) }
+                        var sample = 1
+                        while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 1600) sample *= 2
+                        context.contentResolver.openInputStream(uri)?.use {
+                            android.graphics.BitmapFactory.decodeStream(it, null, android.graphics.BitmapFactory.Options().apply { inSampleSize = sample })
+                        }?.let { decodeQrFromBitmap(it) }
+                    }.getOrNull()
                 }
-            } catch (e: Exception) {
-                statusText = "❌ Görsel okunamadı: ${e.localizedMessage}"
+                if (!decoded.isNullOrBlank()) {
+                    onQrCodeDetected(decoded)
+                } else {
+                    statusText = "❌ Seçilen görselde geçerli bir QR kod bulunamadı."
+                }
             }
         }
     }
@@ -451,8 +458,11 @@ fun RealCameraQrScannerView(
                 val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
                 val analysisExecutor = Executors.newSingleThreadExecutor()
                 val mainExecutor = ContextCompat.getMainExecutor(context)
+                val disposed = AtomicBoolean(false)
+                var boundUseCases: Array<androidx.camera.core.UseCase> = emptyArray()
 
                 val listener = Runnable {
+                    if (disposed.get()) return@Runnable
                     try {
                         val cameraProvider = cameraProviderFuture.get()
                         val preview = Preview.Builder().build().also {
@@ -477,7 +487,9 @@ fun RealCameraQrScannerView(
                                     val decoded = decodeQrFromImageProxy(imageProxy, qrReader)
                                     if (!decoded.isNullOrBlank() && hasDispatchedResult.compareAndSet(false, true)) {
                                         mainExecutor.execute {
-                                            onQrCodeDetected(decoded)
+                                            if (!disposed.get()) onQrCodeDetected(decoded)
+                                            // Allow another scan if the caller rejected this one.
+                                            previewView.postDelayed({ hasDispatchedResult.set(false) }, 2500L)
                                         }
                                     }
                                     imageProxy.close()
@@ -488,7 +500,7 @@ fun RealCameraQrScannerView(
                             .requireLensFacing(lensFacing)
                             .build()
 
-                        cameraProvider.unbindAll()
+                        boundUseCases = arrayOf(preview, imageAnalysis)
                         val cam = cameraProvider.bindToLifecycle(
                             lifecycleOwner,
                             selector,
@@ -506,9 +518,9 @@ fun RealCameraQrScannerView(
                 cameraProviderFuture.addListener(listener, mainExecutor)
 
                 onDispose {
-                    try {
-                        cameraProviderFuture.get().unbindAll()
-                    } catch (_: Exception) {
+                    disposed.set(true)
+                    if (cameraProviderFuture.isDone && boundUseCases.isNotEmpty()) {
+                        runCatching { cameraProviderFuture.get().unbind(*boundUseCases) }
                     }
                     analysisExecutor.shutdown()
                 }
@@ -696,6 +708,8 @@ fun RealCameraPhotoCaptureDialog(
             .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
             .build()
     }
+    val captureExecutor = remember { Executors.newSingleThreadExecutor() }
+    DisposableEffect(Unit) { onDispose { captureExecutor.shutdown() } }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -723,8 +737,11 @@ fun RealCameraPhotoCaptureDialog(
         if (!hasCameraPermission) return@DisposableEffect onDispose {}
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
         val mainExecutor = ContextCompat.getMainExecutor(context)
+        val disposed = AtomicBoolean(false)
+        var boundPreview: Preview? = null
 
         val listener = Runnable {
+            if (disposed.get()) return@Runnable
             try {
                 val cameraProvider = cameraProviderFuture.get()
                 val preview = Preview.Builder().build().also {
@@ -733,7 +750,8 @@ fun RealCameraPhotoCaptureDialog(
                 val selector = CameraSelector.Builder()
                     .requireLensFacing(lensFacing)
                     .build()
-                cameraProvider.unbindAll()
+                cameraProvider.unbind(imageCapture)
+                boundPreview = preview
                 boundCamera = cameraProvider.bindToLifecycle(
                     lifecycleOwner,
                     selector,
@@ -747,9 +765,13 @@ fun RealCameraPhotoCaptureDialog(
         cameraProviderFuture.addListener(listener, mainExecutor)
 
         onDispose {
-            try {
-                cameraProviderFuture.get().unbindAll()
-            } catch (_: Exception) {
+            disposed.set(true)
+            if (cameraProviderFuture.isDone) {
+                runCatching {
+                    val provider = cameraProviderFuture.get()
+                    boundPreview?.let { provider.unbind(it) }
+                    provider.unbind(imageCapture)
+                }
             }
         }
     }
@@ -878,34 +900,31 @@ fun RealCameraPhotoCaptureDialog(
                         onClick = {
                             if (isCapturing) return@Button
                             isCapturing = true
+                            // Decode and encode on a background executor; deliver on the main thread.
                             val mainExec = ContextCompat.getMainExecutor(context)
                             imageCapture.takePicture(
-                                mainExec,
+                                captureExecutor,
                                 object : ImageCapture.OnImageCapturedCallback() {
                                     override fun onCaptureSuccess(image: ImageProxy) {
-                                        try {
-                                            val bmp = image.toBitmap()
-                                            val scaled = Bitmap.createScaledBitmap(
-                                                bmp,
-                                                640,
-                                                (640f * bmp.height / bmp.width.coerceAtLeast(1)).toInt().coerceAtLeast(360),
-                                                true
-                                            )
-                                            val baos = ByteArrayOutputStream()
-                                            scaled.compress(Bitmap.CompressFormat.JPEG, 78, baos)
-                                            val b64 = Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
-                                            onPhotoCapturedDataUri("data:image/jpeg;base64,$b64")
+                                        val dataUri = try {
+                                            kotlinx.coroutines.runBlocking {
+                                                encodeBitmapForSending(image.toBitmap(), image.imageInfo.rotationDegrees)
+                                            }
                                         } catch (e: Exception) {
                                             Log.e("CameraCapture", "Bitmap encode failed", e)
+                                            null
                                         } finally {
                                             image.close()
+                                        }
+                                        mainExec.execute {
                                             isCapturing = false
+                                            if (dataUri != null) onPhotoCapturedDataUri(dataUri)
                                         }
                                     }
 
                                     override fun onError(exception: ImageCaptureException) {
                                         Log.e("CameraCapture", "Capture error", exception)
-                                        isCapturing = false
+                                        mainExec.execute { isCapturing = false }
                                     }
                                 }
                             )
