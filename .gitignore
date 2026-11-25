@@ -17,3 +17,10 @@ local.properties
 .env
 debug.keystore
 *-debug.log
+
+# Firebase / Node tooling
+app/google-services.json
+node_modules/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log

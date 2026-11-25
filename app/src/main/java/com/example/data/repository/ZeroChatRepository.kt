@@ -10,6 +10,7 @@ import com.example.data.model.EncryptedStatus
 import com.example.data.model.UserProfile
 import com.google.firebase.Firebase
 import com.google.firebase.Timestamp
+import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldValue
@@ -32,7 +33,8 @@ import java.util.UUID
 
 class ZeroChatRepository(
     private val db: FirebaseFirestore,
-    private val fallbackUserId: String = ""
+    private val fallbackUserId: String = "",
+    private val auth: FirebaseAuth = Firebase.auth
 ) {
 
     constructor(context: Context) : this(
@@ -40,8 +42,6 @@ class ZeroChatRepository(
             context.applicationContext.getString(R.string.firestore_database_id)
         )
     )
-
-    private val auth = Firebase.auth
 
     private fun isLocalNodeMode(): Boolean {
         return auth.currentUser == null && fallbackUserId.isNotBlank()

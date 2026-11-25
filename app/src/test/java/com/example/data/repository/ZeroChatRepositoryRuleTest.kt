@@ -20,7 +20,7 @@ class ZeroChatRepositoryRuleTest : FirestoreEmulatorTestBase() {
     fun registerProfile_andCreateEncryptedRoom_andSendEnvelope_succeedsForParticipants() = runBlocking {
         val uniqueSuffix = UUID.randomUUID().toString().take(6)
         val aliceUid = signInTestUser("alice_$uniqueSuffix@zerochat.test")
-        val repo = ZeroChatRepository(firestore)
+        val repo = ZeroChatRepository(firestore, auth = auth)
 
         val aliceProfile = withTimeout(DEFAULT_TIMEOUT_MS) {
             repo.registerOrUpdateProfile(
@@ -73,7 +73,7 @@ class ZeroChatRepositoryRuleTest : FirestoreEmulatorTestBase() {
     fun rotateRoomKey_andSteganography_succeedsForParticipant() = runBlocking {
         val uniqueSuffix = UUID.randomUUID().toString().take(6)
         signInTestUser("rotator_$uniqueSuffix@zerochat.test")
-        val repo = ZeroChatRepository(firestore)
+        val repo = ZeroChatRepository(firestore, auth = auth)
 
         val ownerProfile = withTimeout(DEFAULT_TIMEOUT_MS) {
             repo.registerOrUpdateProfile("rotator_$uniqueSuffix", "Rotator", "Key Node").getOrThrow()
@@ -98,7 +98,7 @@ class ZeroChatRepositoryRuleTest : FirestoreEmulatorTestBase() {
     fun crossUserRoomAccess_failsWithPermissionDenied() = runBlocking {
         val uniqueSuffix = UUID.randomUUID().toString().take(6)
         signInTestUser("alice2_$uniqueSuffix@zerochat.test")
-        val repo = ZeroChatRepository(firestore)
+        val repo = ZeroChatRepository(firestore, auth = auth)
         val aliceProfile = withTimeout(DEFAULT_TIMEOUT_MS) {
             repo.registerOrUpdateProfile("alice2_$uniqueSuffix", "Alice", "Bio").getOrThrow()
         }
@@ -123,7 +123,7 @@ class ZeroChatRepositoryRuleTest : FirestoreEmulatorTestBase() {
     @Test
     fun unauthenticatedUser_observeRooms_failsWithPermissionDenied() = runBlocking {
         auth.signOut()
-        val repo = ZeroChatRepository(firestore)
+        val repo = ZeroChatRepository(firestore, auth = auth)
         var caughtError: FirebaseFirestoreException? = null
         try {
             withTimeout(FLOW_TIMEOUT_MS) {

@@ -1,0 +1,16 @@
+{
+  "name": "zerochat-firebase-tests",
+  "private": true,
+  "description": "Firestore security rules tests and emulator tooling for ZeroChat",
+  "scripts": {
+    "emulators": "firebase emulators:start --only firestore,auth --project demo-no-project",
+    "test:rules": "firebase emulators:exec --only firestore --project demo-no-project \"node --test firestore.test.js\"",
+    "test:android": "firebase emulators:exec --only firestore,auth --project demo-no-project \"./gradlew :app:testDebugUnitTest\"",
+    "test": "firebase emulators:exec --only firestore,auth --project demo-no-project \"node --test firestore.test.js && ./gradlew :app:testDebugUnitTest\""
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^4.0.1",
+    "firebase": "^11.10.0",
+    "firebase-tools": "^14.11.0"
+  }
+}
